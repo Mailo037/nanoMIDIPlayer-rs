@@ -184,6 +184,22 @@ impl RootView {
             .child(self.row("Tooltips", "Help text when hovering controls", self.set_switch("a-tooltip", ui.tooltip, cx, |c, v| c.app_ui.tooltip = v)))
             .child(self.row("Show playback time", "Time and progress bar while playing", self.set_switch("a-timestamp", ui.timestamp, cx, |c, v| c.app_ui.timestamp = v)));
 
+        // ---------------- Downloads
+        let kept = crate::hub::kept_download_count();
+        let delete = self.small_button("delete-downloads", &format!("Delete ({kept})"), cx, |this| {
+            let n = crate::hub::delete_kept_downloads();
+            console::insert(format!("Deleted {n} downloaded songs"));
+            this.core.load_saved_files(Target::Midi);
+        });
+        let downloads = self
+            .card(S, "Downloads")
+            .child(self.row(
+                "Keep all downloads",
+                &format!("Off: only the last {} played songs from the MIDI Hub are kept", crate::hub::RECENT_LIMIT),
+                self.set_switch("a-keep-dl", ui.keep_downloads, cx, |c, v| c.app_ui.keep_downloads = v),
+            ))
+            .child(self.row("Saved songs", "Delete all songs kept in Documents/nanoMIDIPlayer/Midis", delete));
+
         // ---------------- Hotkeys
         let hotkeys = self.card(S, "Hotkeys").child(self.hotkey_row(S, cx));
 
@@ -198,13 +214,20 @@ impl RootView {
             .child(self.row("Check for updates", "Look for a new version on startup", self.set_switch("a-updates", ui.check_for_updates, cx, |c, v| c.app_ui.check_for_updates = v)))
             .child(self.row("Debug console", "Shows the detailed log in a terminal", console_buttons));
 
+        let playback = self.card(S, "Playback").child(self.row(
+            "Pause when the game loses focus",
+            "Pauses if you switch to another window and resumes when you go back (MIDI & Drums)",
+            self.set_switch("a-focus-pause", ui.pause_on_focus_loss, cx, |c, v| c.app_ui.pause_on_focus_loss = v),
+        ));
         let midi = self.player_settings(Target::Midi, window, cx);
         let drums = self.player_settings(Target::Drums, window, cx);
 
         self.page("settings-page", S)
             .track_scroll(&self.settings_scroll)
+            .child(playback)
             .child(midi)
             .child(drums)
+            .child(downloads)
             .child(appearance)
             .child(hotkeys)
             .child(advanced)

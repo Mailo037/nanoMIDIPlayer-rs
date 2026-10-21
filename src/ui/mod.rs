@@ -32,7 +32,12 @@ use crate::preview::Preview;
 use crate::theme::{self, Theme};
 use widgets::*;
 
-pub const APP_VERSION: &str = "v11.69.679";
+/// Version of this fork (from Cargo.toml), shown in the title bar and sidebar.
+pub const APP_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+/// This Rust fork.
+pub const FORK_REPO: &str = "https://github.com/Mailo037/nanoMIDIPlayer-rs";
+/// The original Python nanoMIDIPlayer this is forked from.
+pub const UPSTREAM_REPO: &str = "https://github.com/NotHammer043/nanoMIDIPlayer";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HubView {

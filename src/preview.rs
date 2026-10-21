@@ -65,9 +65,8 @@ impl Preview {
     }
 
     fn play(&self, filename: &str, alive: &dyn Fn() -> bool, on_start: impl FnOnce()) -> anyhow::Result<()> {
-        // Uses the same Midis folder as the download button, so a previewed song is
-        // already downloaded when it gets picked.
-        let path = hub::download_midi(filename)?;
+        // Separate preview cache, so previews don't fill up the song list.
+        let path = hub::preview_midi(filename)?;
         let song = midi_file::load(&path)?;
         if !alive() {
             return Ok(());

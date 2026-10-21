@@ -435,15 +435,113 @@ fn save_favorites(favorites: &HashSet<String>) {
 
 /// Downloads a MIDI into `Documents/nanoMIDIPlayer/Midis` and returns the local path.
 /// A file downloaded before is reused without touching the network.
+/// How many downloaded songs are kept when "Keep all downloads" is off.
+pub const RECENT_LIMIT: usize = 20;
+/// How many preview files are kept (they never show up in the song list).
+const PREVIEW_LIMIT: usize = 30;
+
+/// Downloaded songs that are only kept while recently played.
+pub fn recent_dir() -> PathBuf {
+    let dir = cache_dir().join("recent");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn preview_dir() -> PathBuf {
+    let dir = cache_dir().join("preview");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn non_empty(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.len() > 0)
+}
+
+/// Marks a file as just used, so the recent cache keeps it.
+pub fn touch(path: &Path) {
+    if let Ok(f) = std::fs::File::options().write(true).open(path) {
+        let _ = f.set_modified(std::time::SystemTime::now());
+    }
+}
+
+/// Deletes all but the `keep` most recently used `.mid` files in `dir`.
+fn prune(dir: &Path, keep: usize) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = rd
+        .filter_map(|e| e.ok())
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .filter(|(_, p)| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mid") || e.eq_ignore_ascii_case("midi")))
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in files.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// An already downloaded copy of `name` (kept, recent or preview), if any.
+fn existing_copy(name: &str) -> Option<PathBuf> {
+    [config::midis_dir(), recent_dir(), preview_dir()]
+        .into_iter()
+        .map(|d| d.join(name))
+        .find(|p| non_empty(p))
+}
+
+fn fetch_midi_bytes(filename: &str) -> anyhow::Result<Vec<u8>> {
+    net::get_bytes(&format!("https://api.nanomidi.net/api/midis/{filename}"))
+}
+
+/// Downloads a song for playing. With "Keep all downloads" it goes to `Midis`,
+/// otherwise into the recent cache, which only keeps the last `RECENT_LIMIT` songs.
 pub fn download_midi(filename: &str) -> anyhow::Result<PathBuf> {
-    let path = config::midis_dir().join(safe_name(filename));
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 0) {
+    let name = safe_name(filename);
+    let keep = config::get().read().app_ui.keep_downloads;
+    let kept = config::midis_dir().join(&name);
+    if non_empty(&kept) {
+        return Ok(kept);
+    }
+    let target = if keep { kept } else { recent_dir().join(&name) };
+    if !non_empty(&target) {
+        match existing_copy(&name) {
+            Some(copy) => {
+                std::fs::copy(&copy, &target)?;
+            }
+            None => std::fs::write(&target, fetch_midi_bytes(filename)?)?,
+        }
+    }
+    touch(&target);
+    if !keep {
+        prune(&recent_dir(), RECENT_LIMIT);
+    }
+    Ok(target)
+}
+
+/// Downloads a song only for the 30-second preview (kept out of the song list).
+pub fn preview_midi(filename: &str) -> anyhow::Result<PathBuf> {
+    let name = safe_name(filename);
+    if let Some(path) = existing_copy(&name) {
         return Ok(path);
     }
-    let url = format!("https://api.nanomidi.net/api/midis/{filename}");
-    let bytes = net::get_bytes(&url)?;
-    std::fs::write(&path, bytes)?;
+    let path = preview_dir().join(&name);
+    std::fs::write(&path, fetch_midi_bytes(filename)?)?;
+    prune(&preview_dir(), PREVIEW_LIMIT);
     Ok(path)
+}
+
+/// Permanently kept downloads in `Midis` (for the "Delete downloads" button).
+pub fn kept_download_count() -> usize {
+    std::fs::read_dir(config::midis_dir())
+        .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.path().is_file()).count())
+        .unwrap_or(0)
+}
+
+/// Deletes every `.mid` / `.midi` file in the `Midis` folder.
+pub fn delete_kept_downloads() -> usize {
+    let Ok(rd) = std::fs::read_dir(config::midis_dir()) else { return 0 };
+    rd.filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mid") || e.eq_ignore_ascii_case("midi")))
+        .filter(|p| std::fs::remove_file(p).is_ok())
+        .count()
 }
 
 #[cfg(test)]

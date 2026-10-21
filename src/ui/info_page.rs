@@ -243,6 +243,57 @@ impl RootView {
         d
     }
 
+    /// Explains that this is a Rust fork and links to both repositories.
+    fn fork_banner(&self) -> Div {
+        let accent: Hsla = rgb(ACCENT).into();
+        let link = |id: &'static str, label: &'static str, url: &'static str, primary: bool| {
+            div()
+                .id(id)
+                .px(px(14.))
+                .py(px(7.))
+                .rounded_full()
+                .cursor_pointer()
+                .text_size(px(13.))
+                .font_weight(FontWeight::BOLD)
+                .when(primary, |d| d.bg(rgb(0x008000)).hover(|s| s.bg(rgb(0x006400))))
+                .when(!primary, |d| d.bg(rgb(0x2a2a2a)).hover(|s| s.bg(rgb(0x3a3a3a))))
+                .child(label)
+                .on_click(move |_, _, _| net::open_url(url))
+        };
+        div()
+            .rounded(px(16.))
+            .bg(rgb(0x161616))
+            .border_1()
+            .border_color(accent)
+            .p(px(14.))
+            .mb(px(10.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_size(px(18.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(accent)
+                    .child(SharedString::from(format!("nanoMIDIPlayer-rs {}", super::APP_VERSION))),
+            )
+            .child(div().text_size(px(13.)).child(
+                "This is an unofficial fork of nanoMIDIPlayer, rebuilt in Rust with GPUI. \
+                 Bugs in this version belong in the fork's issues, not the original project's.",
+            ))
+            .child(div().text_size(px(13.)).text_color(rgb(0xb0b0b0)).child(
+                "All credit for the original app, MIDI Hub and community goes to NotHammer043 and the nanoMIDI team (see below).",
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.))
+                    .child(link("fork-original", "Original nanoMIDIPlayer ↗", super::UPSTREAM_REPO, true))
+                    .child(link("fork-repo", "This Rust fork ↗", super::FORK_REPO, false)),
+            )
+    }
+
     pub fn info_page(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let white: Hsla = gpui::white();
         let accent: Hsla = rgb(ACCENT).into();
@@ -253,6 +304,7 @@ impl RootView {
             .p(px(20.))
             .font_family("Segoe UI")
             .text_color(white);
+        body = body.child(self.fork_banner());
         let guard = self.info.lock();
         match guard.as_ref() {
             None => body = body.child(div().child("Loading info...")),

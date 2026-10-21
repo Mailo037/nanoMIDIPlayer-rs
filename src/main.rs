@@ -3,6 +3,7 @@
 mod config;
 mod console;
 mod core;
+mod focus;
 mod hub;
 mod keys;
 mod live;
@@ -44,39 +45,33 @@ fn start_telemetry() {
         .ok();
 }
 
-/// Same version.json check as the original. Instead of downloading the Python
-/// bootstrapper it opens the releases page.
+/// Parses "v1.2.3" / "1.2.3" into comparable numbers.
+fn parse_version(v: &str) -> Vec<u64> {
+    v.trim().trim_start_matches('v').split('.').map(|p| p.parse().unwrap_or(0)).collect()
+}
+
+/// Checks the latest GitHub release of this fork and offers to open it if newer.
 fn check_for_updates() {
     std::thread::spawn(|| {
-        let Ok(info) = net::get_json(
-            "https://raw.githubusercontent.com/NotHammer043/nanoMIDIPlayer/refs/heads/main/api/version.json",
-        ) else {
+        let api = format!(
+            "https://api.github.com/repos/{}/releases/latest",
+            ui::FORK_REPO.trim_start_matches("https://github.com/")
+        );
+        let Ok(info) = net::get_json(&api) else { return };
+        let Some(latest) = info["tag_name"].as_str() else { return };
+        if parse_version(latest) <= parse_version(APP_VERSION) {
             return;
-        };
-        let contains = |key: &str| {
-            info[key]
-                .as_array()
-                .map(|a| a.iter().any(|v| v.as_str() == Some(APP_VERSION)))
-                .unwrap_or(false)
-        };
-        let releases = "https://github.com/NotHammer043/nanoMIDIPlayer/releases/latest";
-        if contains("avoid") {
-            let msg = info["alertMessage"].as_str().unwrap_or("").to_string();
-            rfd::MessageDialog::new()
-                .set_title("Critical Update Required")
-                .set_description(msg)
-                .set_level(rfd::MessageLevel::Warning)
-                .show();
-            net::open_url(releases);
-        } else if !contains("latest") {
-            let yes = rfd::MessageDialog::new()
-                .set_title("Update Available")
-                .set_description("A new version of nanoMIDIPlayer is available.\n\nWould you like to update now?")
-                .set_buttons(rfd::MessageButtons::YesNo)
-                .show();
-            if yes == rfd::MessageDialogResult::Yes {
-                net::open_url(releases);
-            }
+        }
+        let url = info["html_url"].as_str().unwrap_or(ui::FORK_REPO).to_string();
+        let yes = rfd::MessageDialog::new()
+            .set_title("Update Available")
+            .set_description(format!(
+                "nanoMIDIPlayer-rs {latest} is available (you have {APP_VERSION}).\n\nOpen the download page?"
+            ))
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show();
+        if yes == rfd::MessageDialogResult::Yes {
+            net::open_url(&url);
         }
     });
 }
@@ -103,6 +98,7 @@ fn main() {
         });
     }
     core::start_hotkeys(core.clone());
+    focus::start(core.clone());
     if ui_cfg.send_telemetry {
         start_telemetry();
     }

@@ -243,6 +243,17 @@ pub struct AppUi {
     pub check_for_updates: bool,
     #[serde(rename = "sendTelemetry")]
     pub send_telemetry: bool,
+    /// Keep every song downloaded from the MIDI Hub in `Midis`. When off, only the
+    /// most recently played downloads are kept (see `hub::RECENT_LIMIT`).
+    #[serde(rename = "keepDownloads", default)]
+    pub keep_downloads: bool,
+    /// Pause keyboard playback while another window than the game is focused.
+    #[serde(rename = "pauseOnFocusLoss", default = "default_true")]
+    pub pause_on_focus_loss: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

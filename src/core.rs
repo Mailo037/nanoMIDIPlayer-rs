@@ -54,6 +54,9 @@ pub struct Core {
     pub drums: Arc<Player>,
     pub live: Arc<LiveInput>,
     pub state: Mutex<CoreState>,
+    /// Set while a player is paused because the game window lost focus
+    /// (index: `Target as usize`), see `focus.rs`.
+    pub auto_paused: [std::sync::atomic::AtomicBool; 2],
     version: AtomicU64,
 }
 
@@ -74,6 +77,7 @@ impl Core {
             drums: Player::new(true, 2),
             live: LiveInput::new(3),
             state: Mutex::new(CoreState::default()),
+            auto_paused: Default::default(),
             version: AtomicU64::new(0),
         });
         core.load_saved_files(Target::Midi);
@@ -133,6 +137,15 @@ impl Core {
 
         let mut entries: Vec<String> = Vec::new();
         if target == Target::Midi {
+            if let Ok(rd) = std::fs::read_dir(crate::hub::recent_dir()) {
+                let mut recent: Vec<(std::time::SystemTime, String)> = rd
+                    .filter_map(|e| e.ok())
+                    .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path().to_string_lossy().into_owned())))
+                    .filter(|(_, p)| p.to_lowercase().ends_with(".mid") || p.to_lowercase().ends_with(".midi"))
+                    .collect();
+                recent.sort_by(|a, b| b.0.cmp(&a.0));
+                entries.extend(recent.into_iter().map(|(_, p)| p).filter(|p| !list.contains(p)));
+            }
             if let Ok(rd) = std::fs::read_dir(config::midis_dir()) {
                 let mut found: Vec<String> = rd
                     .filter_map(|e| e.ok())
@@ -178,21 +191,16 @@ impl Core {
                 Target::Midi => (&mut c.midi_player.midi_list, &mut c.midi_player.current_file),
                 Target::Drums => (&mut c.drums.midi_list, &mut c.drums.current_file),
             };
-            if !list.contains(&path) {
+            let in_recent = Path::new(&path).starts_with(crate::hub::recent_dir());
+            if !in_recent && !list.contains(&path) {
                 list.push(path.clone());
             }
             *current = path.clone();
         });
-        {
-            let mut state = self.state.lock();
-            let files = Self::files(&mut state, target);
-            if !files.files.contains(&path) {
-                files.files.push(path.clone());
-            }
-            files.current = Some(path);
-            files.length = length;
-        }
-        self.bump();
+        // Reload so songs pruned from the recent cache disappear from the dropdown.
+        self.load_saved_files(target);
+        let mut state = self.state.lock();
+        Self::files(&mut state, target).length = length;
     }
 
     /// Switches to another entry of the dropdown.
@@ -321,6 +329,9 @@ impl Core {
             Target::Midi if config::get().read().midi_player.use_midi_output => Mode::MidiOut,
             Target::Midi => Mode::Qwerty,
         };
+        if Path::new(&path).starts_with(crate::hub::recent_dir()) {
+            crate::hub::touch(Path::new(&path));
+        }
         if let Err(e) = player.start(PathBuf::from(path), mode, output) {
             console::insert(e.to_string());
         }

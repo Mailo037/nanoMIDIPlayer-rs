@@ -1,6 +1,8 @@
-# nanoMIDIPlayer (Rust + GPUI)
+# nanoMIDIPlayer-rs
 
-A Rust rebuild of [NotHammer043/nanoMIDIPlayer](https://github.com/NotHammer043/nanoMIDIPlayer) on [GPUI](https://www.gpui.rs/). It keeps the original's features, layout and themes, and runs natively without Python.
+An **unofficial fork** of [NotHammer043/nanoMIDIPlayer](https://github.com/NotHammer043/nanoMIDIPlayer), rebuilt in Rust on [GPUI](https://www.gpui.rs/). It keeps the original's features and themes and runs natively without Python. All credit for the original app, the MIDI Hub and the nanoMIDI community goes to NotHammer043 and the nanoMIDI team. Report problems with this version in this fork's issues, not the original project's.
+
+**Download:** see [Releases](https://github.com/Mailo037/nanoMIDIPlayer-rs/releases).
 
 ## Features (same as the original)
 - **MIDI Player**: MIDI → QWERTY or direct to a MIDI output device; Sustain, No Doubles, Velocity, 88 Keys, Pitch (octave) and Key (transpose), finger limit, speed 1–500 %

@@ -143,6 +143,8 @@ impl RootView {
 
         let (status, status_color) = if !running {
             ("Stopped", self.color(section, "TextColorDisabled"))
+        } else if paused && self.core.auto_paused[target as usize].load(std::sync::atomic::Ordering::Acquire) {
+            ("Paused · click back into your game", self.color(section, "PausedColor"))
         } else if paused {
             ("Paused", self.color(section, "PausedColor"))
         } else {
