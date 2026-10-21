@@ -1,0 +1,66 @@
+[package]
+name = "nanomidiplayer"
+version = "1.0.0"
+edition = "2021"
+description = "nanoMIDIPlayer rebuilt in Rust with GPUI: MIDI to QWERTY / MIDI output player"
+license = "GPL-3.0-only"
+
+[[bin]]
+name = "nanoMIDIPlayer"
+path = "src/main.rs"
+
+[dependencies]
+gpui = "0.2.2"
+midly = "0.5"
+midir = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+parking_lot = "0.12"
+rand = "0.9"
+dirs = "6"
+base64 = "0.22"
+rfd = "0.15"
+ureq = { version = "3", features = ["json"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+anyhow = "1"
+raw-window-handle = "0.6"
+log = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+crossbeam-channel = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+    "Win32_Media",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+# Day-to-day builds: no debug info (big link-time win), incremental.
+[profile.dev]
+debug = false
+
+[profile.dev.package."*"]
+debug = false
+
+# `cargo build --release`: fast to build, still optimized.
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 16
+incremental = true
+strip = true
+panic = "abort"
+
+# `cargo build --profile dist`: slowest build, smallest/fastest binary for distribution.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+incremental = false
