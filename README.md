@@ -12,6 +12,12 @@ An **unofficial fork** of [NotHammer043/nanoMIDIPlayer](https://github.com/NotHa
 - **Settings**: loop, release on pause, custom hold length, random fail (speed/transpose), hotkey step size, keyboard module (`pynput` = virtual-key, `keyboard` = scancode), always on top, console, tooltips, timestamp, update check, debug console, themes (API + custom), hotkeys
 - Global hotkeys (default F1–F5), active on the MIDI Player and Drums tabs
 
+## Added in this fork
+- Right-click menus on songs, the player, hub songs, hotkeys and the log (play from start, speed presets, loop, show in Explorer, copy link, favorites, Alt+1…9 song slots, …)
+- Click or drag the timeline to jump inside a playing or paused song
+- Settings split into categories (General, Players, Hotkeys, Library, Theme, Updates, Advanced)
+- Built-in updater: "Check now", optional automatic install in the background, "Restart now"
+
 It uses the same data folder (`Documents/nanoMIDIPlayer`) and the same `config.json`, theme and custom-theme formats, so existing settings and downloaded MIDIs carry over.
 
 ## Why it's faster
@@ -30,5 +36,5 @@ The binary is written to `target/release/nanoMIDIPlayer.exe`. Run with `--debug`
 
 ## Notes
 - Key simulation and global hotkeys are implemented for Windows (SendInput / low-level keyboard hook). The rest builds on macOS and Linux, but key simulation is a no-op there for now.
-- When the update check finds a newer version, it opens the releases page instead of running the Python bootstrapper.
+- Updates come from this fork's GitHub releases. The new exe is downloaded next to the running one and swapped in (the old file is kept as `nanoMIDIPlayer.exe.old` until the next start). `NANOMIDI_PRETEND_VERSION=1.0.0` makes the app think it is older, to test the update flow.
 - Licensed GPL-3.0, like the original.

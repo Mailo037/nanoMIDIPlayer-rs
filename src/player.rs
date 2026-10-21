@@ -44,6 +44,8 @@ pub struct Player {
     speed_bits: AtomicU64,
     version: AtomicU64,
     clock: Mutex<Clock>,
+    /// Position (seconds) the playback thread should jump to.
+    seek_to: Mutex<Option<f64>>,
     thread: Mutex<Option<JoinHandle<()>>>,
     sender: Arc<KeySender>,
     group: u32,
@@ -59,6 +61,7 @@ impl Player {
             speed_bits: AtomicU64::new(1.0f64.to_bits()),
             version: AtomicU64::new(0),
             clock: Mutex::new(Clock::default()),
+            seek_to: Mutex::new(None),
             thread: Mutex::new(None),
             sender: KeySender::new(true),
             group,
@@ -126,6 +129,30 @@ impl Player {
         (pos.min(clock.length).max(0.0), clock.length)
     }
 
+    /// Jumps to `secs` in the running song (held keys are released first).
+    pub fn seek(&self, secs: f64) {
+        if !self.is_running() {
+            return;
+        }
+        let secs = {
+            let mut clock = self.clock.lock();
+            let secs = secs.clamp(0.0, clock.length.max(0.0));
+            clock.song_pos = secs;
+            clock.wall = Some(Instant::now());
+            secs
+        };
+        *self.seek_to.lock() = Some(secs);
+        self.bump();
+    }
+
+    fn take_seek(&self) -> Option<f64> {
+        self.seek_to.lock().take()
+    }
+
+    fn seek_pending(&self) -> bool {
+        self.seek_to.lock().is_some()
+    }
+
     pub fn toggle_pause(&self) -> bool {
         let paused = !self.paused.load(Ordering::Acquire);
         self.paused.store(paused, Ordering::Release);
@@ -161,6 +188,7 @@ impl Player {
 
         self.stop.store(false, Ordering::Release);
         self.paused.store(false, Ordering::Release);
+        *self.seek_to.lock() = None;
         self.running.store(true, Ordering::Release);
         *self.clock.lock() = Clock {
             song_pos: 0.0,
@@ -265,10 +293,31 @@ impl Player {
         let mut target = Instant::now();
         let mut song_pos = 0.0;
         let mut was_paused = false;
-        for ev in &song.events {
+        let mut i = 0;
+        'events: while i < song.events.len() {
             if self.should_stop() {
                 return false;
             }
+            if let Some(to) = self.take_seek() {
+                // Restart from the first event at or after `to`; tempo is already
+                // baked into the deltas, so skipping events needs no extra state.
+                sink.release_all();
+                let mut before = 0.0;
+                i = 0;
+                while i < song.events.len() && before + song.events[i].delta < to {
+                    before += song.events[i].delta;
+                    i += 1;
+                }
+                song_pos = before;
+                let now = Instant::now();
+                target = now.checked_sub(Duration::from_secs_f64((to - before).max(0.0) / self.speed())).unwrap_or(now);
+                let mut clock = self.clock.lock();
+                clock.song_pos = to;
+                clock.wall = Some(now);
+                continue;
+            }
+            let ev = &song.events[i];
+            i += 1;
             let (fail_enabled, speed_fail, transpose_fail) = self.random_fail();
             let mut delay = ev.delta / self.speed();
             if fail_enabled && !ev.event.is_meta() && rng.random::<f64>() < speed_fail {
@@ -281,6 +330,9 @@ impl Player {
             loop {
                 if self.should_stop() {
                     return false;
+                }
+                if self.seek_pending() {
+                    continue 'events;
                 }
                 if self.is_paused() {
                     if !was_paused {

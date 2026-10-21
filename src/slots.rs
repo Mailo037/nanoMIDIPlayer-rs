@@ -79,6 +79,14 @@ pub fn clear_song(key: &str) {
     save(&slots);
 }
 
+pub fn clear(slot: usize) {
+    let mut slots = store().lock();
+    if let Some(s) = slots.get_mut(slot) {
+        *s = None;
+    }
+    save(&slots);
+}
+
 /// Alt+<n>: stops the MIDI Player and loads the slot's song (downloaded if needed).
 pub fn activate(core: &Arc<Core>, slot: usize) {
     let Some(song) = get(slot) else {

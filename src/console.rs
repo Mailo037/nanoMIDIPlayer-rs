@@ -84,6 +84,35 @@ pub fn lines(max: usize) -> Vec<String> {
     state.lines.iter().skip(skip).cloned().collect()
 }
 
+/// Short message shown at the bottom of the window for a few seconds.
+static TOAST: Mutex<Option<(String, std::time::Instant)>> = parking_lot::const_mutex(None);
+static TOAST_VERSION: AtomicU64 = AtomicU64::new(0);
+const TOAST_SECS: f32 = 2.8;
+
+pub fn toast(msg: impl Into<String>) {
+    *TOAST.lock() = Some((msg.into(), std::time::Instant::now()));
+    TOAST_VERSION.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The current toast, if it hasn't expired yet.
+pub fn current_toast() -> Option<String> {
+    let mut t = TOAST.lock();
+    if t.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs_f32() > TOAST_SECS) {
+        *t = None;
+        TOAST_VERSION.fetch_add(1, Ordering::Relaxed);
+    }
+    t.as_ref().map(|(m, _)| m.clone())
+}
+
+pub fn toast_version() -> u64 {
+    TOAST_VERSION.load(Ordering::Relaxed)
+}
+
+/// All stored messages as plain text (for "Copy log").
+pub fn all_text() -> String {
+    STATE.lock().lines.iter().cloned().collect::<Vec<_>>().join("\n")
+}
+
 /// Hard-wraps text at 27 columns like `textwrap.wrap(..., break_long_words=True)`.
 fn wrap(text: &str) -> String {
     let mut out: Vec<String> = Vec::new();

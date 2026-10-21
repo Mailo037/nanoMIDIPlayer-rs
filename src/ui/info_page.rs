@@ -289,8 +289,8 @@ impl RootView {
                     .flex()
                     .flex_wrap()
                     .gap(px(8.))
-                    .child(link("fork-original", "Original nanoMIDIPlayer ↗", super::UPSTREAM_REPO, true))
-                    .child(link("fork-repo", "This Rust fork ↗", super::FORK_REPO, false)),
+                    .child(link("fork-original", "Original nanoMIDIPlayer »", super::UPSTREAM_REPO, true))
+                    .child(link("fork-repo", "This Rust fork »", super::FORK_REPO, false)),
             )
     }
 

@@ -17,13 +17,14 @@ mod simulate;
 mod slots;
 mod theme;
 mod ui;
+mod update;
 
 use std::time::Duration;
 
 use gpui::{App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
 use crate::theme::Theme;
-use crate::ui::{APP_VERSION, RootView};
+use crate::ui::RootView;
 
 fn start_telemetry() {
     std::thread::Builder::new()
@@ -43,37 +44,6 @@ fn start_telemetry() {
             }
         })
         .ok();
-}
-
-/// Parses "v1.2.3" / "1.2.3" into comparable numbers.
-fn parse_version(v: &str) -> Vec<u64> {
-    v.trim().trim_start_matches('v').split('.').map(|p| p.parse().unwrap_or(0)).collect()
-}
-
-/// Checks the latest GitHub release of this fork and offers to open it if newer.
-fn check_for_updates() {
-    std::thread::spawn(|| {
-        let api = format!(
-            "https://api.github.com/repos/{}/releases/latest",
-            ui::FORK_REPO.trim_start_matches("https://github.com/")
-        );
-        let Ok(info) = net::get_json(&api) else { return };
-        let Some(latest) = info["tag_name"].as_str() else { return };
-        if parse_version(latest) <= parse_version(APP_VERSION) {
-            return;
-        }
-        let url = info["html_url"].as_str().unwrap_or(ui::FORK_REPO).to_string();
-        let yes = rfd::MessageDialog::new()
-            .set_title("Update Available")
-            .set_description(format!(
-                "nanoMIDIPlayer-rs {latest} is available (you have {APP_VERSION}).\n\nOpen the download page?"
-            ))
-            .set_buttons(rfd::MessageButtons::YesNo)
-            .show();
-        if yes == rfd::MessageDialogResult::Yes {
-            net::open_url(&url);
-        }
-    });
 }
 
 fn main() {
@@ -102,9 +72,7 @@ fn main() {
     if ui_cfg.send_telemetry {
         start_telemetry();
     }
-    if ui_cfg.check_for_updates && cfg!(windows) {
-        check_for_updates();
-    }
+    update::on_startup();
 
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(600.), px(560.)), cx);

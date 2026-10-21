@@ -241,6 +241,9 @@ pub struct AppUi {
     pub timestamp: bool,
     #[serde(rename = "checkForUpdates")]
     pub check_for_updates: bool,
+    /// Download and install a found update right away (see `update.rs`).
+    #[serde(rename = "autoUpdate", default)]
+    pub auto_update: bool,
     #[serde(rename = "sendTelemetry")]
     pub send_telemetry: bool,
     /// Keep every song downloaded from the MIDI Hub in `Midis`. When off, only the

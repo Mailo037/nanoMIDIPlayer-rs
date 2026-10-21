@@ -6,7 +6,7 @@ use gpui::prelude::*;
 use gpui::{Context, Div, ElementId, MouseButton, Window, div, img, px};
 
 use super::widgets::*;
-use super::{DropId, EntryId, RootView};
+use super::{DropId, EntryId, MenuItem, RootView};
 use crate::{console, net};
 use crate::core::{Tab, Target};
 use crate::hub::{self, HubStatus, SortMode};
@@ -160,7 +160,7 @@ impl RootView {
                 &self.theme,
                 ButtonSpec {
                     id: ElementId::NamedInteger("hub-open".into(), index as u64),
-                    label: "↗".into(),
+                    label: "»".into(),
                     width: size,
                     height: size,
                     enabled: true,
@@ -184,19 +184,7 @@ impl RootView {
                     colors: self.button_colors(S, "DownloadButtonColor", "DownloadButtonHoverColor"),
                     icon: self.theme.icons.download.clone().map(|i| (i, icon_size)),
                 },
-                Self::click(cx, move |this, _, cx| {
-                    let core = this.core.clone();
-                    let file = file.clone();
-                    std::thread::spawn(move || match hub::download_midi(&file) {
-                        Ok(path) => {
-                            core.use_file(Target::Midi, &path);
-                            console::log("Downloaded MIDI File:");
-                            console::insert(path.display().to_string());
-                        }
-                        Err(e) => console::insert(format!("Download failed: {e}")),
-                    });
-                    this.show_tab(Tab::Midi, cx);
-                }),
+                Self::click(cx, move |this, _, cx| this.hub_load(file.clone(), false, cx)),
             );
             out.push(with_tooltip(dl, self.tooltips(), "Download and open in MIDI Player", &self.theme).into_any_element());
         }
@@ -230,18 +218,10 @@ impl RootView {
         let arranger = midi.arranger.as_deref().filter(|a| !a.is_empty()).unwrap_or("N/A");
         let hotkey = slot.map(|n| format!("Hotkey: Alt+{}", n + 1));
 
-        // Right-click opens the Alt+1…9 slot picker below the card.
-        let picker_key = key.clone();
-        let toggle_picker = Self::handler(cx, move |this, _: (), _, cx| {
-            this.slot_picker = if this.slot_picker.as_deref() == Some(picker_key.as_str()) { None } else { Some(picker_key.clone()) };
-            this.hub_version.fetch_add(1, Ordering::Release);
-            cx.notify();
-        });
+        // Right-click opens the song menu (play, download, favorite, hotkey slot, …).
+        let menu_song = midi.clone();
         let base = div()
-            .on_mouse_down(MouseButton::Right, move |_, window, cx| {
-                cx.stop_propagation();
-                toggle_picker((), window, cx)
-            })
+            .on_mouse_down(MouseButton::Right, Self::menu_trigger(cx, move |this| this.hub_song_menu(&menu_song)))
             .rounded(px(14.))
             .bg(self.color(S, "MidiCardBackColor"))
             .overflow_hidden();
@@ -329,6 +309,88 @@ impl RootView {
         div().flex().flex_col().gap(px(4.)).child(card).child(self.slot_picker_row(midi, slot, cx))
     }
 
+    /// Downloads a song and loads it into the MIDI Player (optionally starting it).
+    fn hub_load(&mut self, file: String, play: bool, cx: &mut Context<Self>) {
+        let core = self.core.clone();
+        console::toast("Downloading…");
+        std::thread::spawn(move || match hub::download_midi(&file) {
+            Ok(path) => {
+                core.use_file(Target::Midi, &path);
+                console::log("Downloaded MIDI File:");
+                console::insert(path.display().to_string());
+                if play {
+                    core.start(Target::Midi);
+                    console::toast("Playing — click into your game");
+                } else {
+                    console::toast("Song loaded in the MIDI Player");
+                }
+            }
+            Err(e) => {
+                console::insert(format!("Download failed: {e}"));
+                console::toast("Download failed");
+            }
+        });
+        self.show_tab(Tab::Midi, cx);
+    }
+
+    fn hub_song_menu(&self, midi: &hub::HubMidi) -> Vec<MenuItem> {
+        let key = midi.key();
+        let file = midi.midi_filename.clone().filter(|f| !f.is_empty());
+        let has_file = file.is_some();
+        let favorite = self.hub.lock().is_favorite(&key);
+        let slot = slots::slot_of(&key);
+        let previewing = self.preview.state_of(&key).is_some();
+        let url = midi.page_url();
+        let title = if midi.artists.is_empty() { midi.name.clone() } else { format!("{} · {}", midi.name, midi.artists) };
+
+        let (f1, f2, f3) = (file.clone().unwrap_or_default(), file.clone().unwrap_or_default(), file.clone().unwrap_or_default());
+        let (k1, k2, k3, k4) = (key.clone(), key.clone(), key.clone(), key.clone());
+        let (u1, u2) = (url.clone().unwrap_or_default(), url.clone().unwrap_or_default());
+        let mut items = vec![
+            MenuItem::title(ellipsize(&title, 10.0, 240.0)),
+            MenuItem::new("▶", "Play now", move |this, _, cx| this.hub_load(f1.clone(), true, cx)).enabled(has_file),
+            MenuItem::new("⬇", "Load into MIDI Player", move |this, _, cx| this.hub_load(f2.clone(), false, cx)).enabled(has_file),
+            MenuItem::new(if previewing { "■" } else { "♪" }, if previewing { "Stop preview" } else { "Preview (30 s)" }, move |this, _, cx| {
+                if this.preview.state_of(&k1).is_some() {
+                    this.preview.stop();
+                } else {
+                    this.preview.start(k1.clone(), f3.clone(), this.hub_version.clone());
+                }
+                this.hub_version.fetch_add(1, Ordering::Release);
+                cx.notify();
+            })
+            .enabled(has_file),
+            MenuItem::Separator,
+            MenuItem::new(if favorite { "★" } else { "☆" }, if favorite { "Remove from favorites" } else { "Add to favorites" }, move |this, _, cx| {
+                this.hub.lock().toggle_favorite(k2.clone());
+                console::toast(if favorite { "Removed from favorites" } else { "Added to favorites" });
+                this.hub_version.fetch_add(1, Ordering::Release);
+                cx.notify();
+            }),
+            MenuItem::new("⌥", match slot { Some(n) => format!("Hotkey: Alt+{} (change…)", n + 1), None => "Assign hotkey Alt+1…9…".into() }, move |this, _, cx| {
+                this.slot_picker = Some(k3.clone());
+                this.hub_version.fetch_add(1, Ordering::Release);
+                cx.notify();
+            })
+            .enabled(has_file),
+        ];
+        if let Some(n) = slot {
+            items.push(MenuItem::new("✕", format!("Remove hotkey Alt+{}", n + 1), move |this, _, cx| {
+                slots::clear_song(&k4);
+                console::toast(format!("Alt+{} cleared", n + 1));
+                this.hub_version.fetch_add(1, Ordering::Release);
+                cx.notify();
+            }));
+        }
+        items.extend([
+            MenuItem::Separator,
+            MenuItem::new("»", "Open on nanomidi.net", move |_, _, _| net::open_url(&u1)).enabled(url.is_some()),
+            MenuItem::new("⧉", "Copy link", move |this, _, cx| this.copy_text(u2.clone(), "Link", cx)).enabled(url.is_some()),
+            MenuItem::new("⧉", "Copy song name", move |this, _, cx| this.copy_text(title.clone(), "Song name", cx)),
+        ]);
+        items
+    }
+
     /// Small button group for switching between List / Compact / Grid.
     fn hub_view_switch(&self, cx: &mut Context<Self>) -> Div {
         let on = self.color(S, "DownloadButtonColor");
@@ -360,6 +422,7 @@ impl RootView {
                 .child(glyph)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.hub_view = mode;
+                    this.slot_picker = None;
                     this.hub_version.fetch_add(1, Ordering::Release);
                     cx.notify();
                 }));
@@ -405,6 +468,7 @@ impl RootView {
                     } else {
                         slots::assign(n, &song);
                         console::insert(format!("Alt+{} → {}", n + 1, song.name));
+                        console::toast(format!("Alt+{} → {}", n + 1, song.name));
                     }
                     this.slot_picker = None;
                     this.hub_version.fetch_add(1, Ordering::Release);
@@ -544,6 +608,15 @@ impl RootView {
             .flex()
             .flex_col()
             .gap(px(8.))
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(text(&self.theme, "MIDI Hub", 22.0, text_color).font_weight(gpui::FontWeight::SEMIBOLD))
+                    .child(lines(&self.theme, "right-click a song for more", 11.0, self.color("Settings", "TextColorDisabled"))),
+            )
             .child(search_row);
 
         let mut body = div().flex().flex_col().gap(px(10.)).pb(px(10.));

@@ -30,7 +30,10 @@ pub struct Icons {
 
 pub struct Theme {
     pub name: String,
+    /// The theme's own font (monospace in the stock themes); only used for the log.
     pub font: String,
+    /// Font of the interface: the system UI font, so the app looks native and modern.
+    pub ui_font: String,
     colors: HashMap<String, HashMap<String, Hsla>>,
     pub icons: Icons,
     pub watermark_ln1: String,
@@ -173,6 +176,7 @@ impl Theme {
         Ok(Theme {
             name: json["Name"].as_str().unwrap_or("Unknown").to_string(),
             font,
+            ui_font: ui_font().to_string(),
             colors,
             icons,
             watermark_ln1: nav["CustomThemeWatermarkLN1"].as_str().unwrap_or("").to_string(),
@@ -206,6 +210,16 @@ impl Theme {
             .and_then(|s| s.get(key))
             .copied()
             .unwrap_or_else(|| gpui::white())
+    }
+}
+
+fn ui_font() -> &'static str {
+    if cfg!(target_os = "macos") {
+        ".SystemUIFont"
+    } else if cfg!(target_os = "linux") {
+        "Noto Sans"
+    } else {
+        "Segoe UI"
     }
 }
 

@@ -3,6 +3,7 @@
 mod controls;
 mod hub_page;
 mod info_page;
+mod menu;
 mod pages;
 mod settings_page;
 pub mod widgets;
@@ -22,6 +23,8 @@ use gpui::{
 use parking_lot::Mutex;
 
 pub use controls::Control;
+pub use menu::MenuItem;
+pub use settings_page::SettingsSection;
 
 use crate::config::{self, HotkeySlot};
 use crate::console;
@@ -30,6 +33,7 @@ use crate::hub::Hub;
 use crate::live::PIANO;
 use crate::preview::Preview;
 use crate::theme::{self, Theme};
+use crate::update;
 use widgets::*;
 
 /// Version of this fork (from Cargo.toml), shown in the title bar and sidebar.
@@ -90,6 +94,9 @@ pub struct RootView {
     pub entries: HashMap<EntryId, EntryState>,
     pub slider_bounds: Rc<RefCell<HashMap<Control, Bounds<Pixels>>>>,
     pub drag: Option<Control>,
+    /// Timeline being dragged and the position (0..1) under the mouse.
+    pub scrub: Option<(Target, f32)>,
+    pub scrub_bounds: Rc<RefCell<HashMap<Target, Bounds<Pixels>>>>,
     pub hub: Arc<Mutex<Hub>>,
     pub hub_version: Arc<AtomicU64>,
     pub hub_requested: bool,
@@ -109,6 +116,11 @@ pub struct RootView {
     /// Layout of the MIDI Hub song list.
     pub hub_view: HubView,
     pub topmost_applied: Option<bool>,
+    /// Open right-click menu.
+    pub context_menu: Option<menu::ContextMenu>,
+    /// Sub-page of the Settings tab.
+    /// `None` = the category overview.
+    pub settings_section: Option<SettingsSection>,
     last_signature: u64,
 }
 
@@ -144,6 +156,8 @@ impl RootView {
             entries: HashMap::new(),
             slider_bounds: Rc::new(RefCell::new(HashMap::new())),
             drag: None,
+            scrub: None,
+            scrub_bounds: Rc::new(RefCell::new(HashMap::new())),
             hub: Arc::new(Mutex::new(Hub::new())),
             hub_version: Arc::new(AtomicU64::new(0)),
             hub_requested: false,
@@ -160,6 +174,8 @@ impl RootView {
             advanced: false,
             hub_view: HubView::List,
             topmost_applied: None,
+            context_menu: None,
+            settings_section: None,
             last_signature: 0,
         };
         view.core.set_tab(Tab::Midi);
@@ -186,6 +202,9 @@ impl RootView {
         sig = sig.wrapping_mul(31).wrapping_add(self.info_version.load(Ordering::Acquire));
         sig = sig.wrapping_mul(31).wrapping_add(config::get().generation());
         sig = sig.wrapping_mul(31).wrapping_add(self.themes.lock().loaded as u64);
+        sig = sig.wrapping_mul(31).wrapping_add(update::version());
+        let _ = console::current_toast(); // expires old toasts
+        sig = sig.wrapping_mul(31).wrapping_add(console::toast_version());
         if sig != self.last_signature {
             self.last_signature = sig;
             cx.notify();
@@ -333,6 +352,24 @@ impl RootView {
         let usable = (bounds.size.width - knob).max(px(1.));
         let frac = ((x - bounds.origin.x - knob / 2.0) / usable) as f32;
         control.set_from_fraction(&self.core, frac);
+    }
+
+    pub fn scrub_to(&mut self, x: Pixels) {
+        let Some((target, _)) = self.scrub else { return };
+        let Some(bounds) = self.scrub_bounds.borrow().get(&target).copied() else { return };
+        let frac = ((x - bounds.origin.x) / bounds.size.width.max(px(1.))) as f32;
+        self.scrub = Some((target, frac.clamp(0.0, 1.0)));
+    }
+
+    /// Releases the timeline: jumps there.
+    fn finish_scrub(&mut self) -> bool {
+        match self.scrub.take() {
+            Some((target, frac)) => {
+                self.core.seek(target, frac as f64);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Text entry bound to a [`Control`] or the hub search field.
@@ -493,6 +530,34 @@ impl RootView {
                 this.core.begin_capture(slot);
                 cx.notify();
             }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            Self::menu_trigger(cx, move |_| {
+                let default = config::Config::defaults().hotkeys.get(slot).to_string();
+                let current = config::get().read().hotkeys.get(slot).to_string();
+                let is_default = current.eq_ignore_ascii_case(&default);
+                vec![
+                    MenuItem::title(tooltip.trim_end_matches(" Hotkey")),
+                    MenuItem::new("⌥", "Change key…", move |this, _, cx| {
+                        this.core.begin_capture(slot);
+                        cx.notify();
+                    }),
+                    MenuItem::new("⟲", format!("Reset to {}", default.to_uppercase()), move |this, _, cx| {
+                        let taken = HotkeySlot::ALL
+                            .iter()
+                            .any(|s| *s != slot && config::get().read().hotkeys.get(*s).eq_ignore_ascii_case(&default));
+                        if taken {
+                            console::toast(format!("{} is used by another hotkey", default.to_uppercase()));
+                        } else {
+                            config::get().update(|c| c.hotkeys.set(slot, default.clone()));
+                            this.core.bump();
+                        }
+                        cx.notify();
+                    })
+                    .enabled(!is_default),
+                ]
+            }),
         );
         with_tooltip(el, self.tooltips(), tooltip, &self.theme)
     }
@@ -525,7 +590,13 @@ impl RootView {
             .flex_col();
         let color = self.color("MidiPlayer", "TextColor");
         for msg in console::lines(max) {
-            d = d.child(lines(&self.theme, &msg, 12.0, color).line_height(px(15.)));
+            // The log keeps the theme's monospace font.
+            d = d.child(
+                lines(&self.theme, &msg, 12.0, color)
+                    .font_family(self.theme.font.clone())
+                    .font_weight(gpui::FontWeight::NORMAL)
+                    .line_height(px(15.)),
+            );
         }
         d
     }
@@ -543,7 +614,10 @@ impl RootView {
             }
         };
         let show = config::get().read().app_ui.timestamp;
-        let (pos, len) = if player.is_running() { player.position() } else { (0.0, length) };
+        let (mut pos, len) = if player.is_running() { player.position() } else { (0.0, length) };
+        if let Some((_, frac)) = self.scrub.filter(|(t, _)| *t == target) {
+            pos = len * frac as f64;
+        }
         let total = crate::midi_file::format_time(len);
         if show {
             format!("{} / {}", crate::midi_file::format_time(pos), total)
@@ -555,6 +629,7 @@ impl RootView {
     // ------------------------------------------------------------- navigation
 
     pub fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.context_menu = None;
         if self.tab == tab {
             return;
         }
@@ -569,6 +644,38 @@ impl RootView {
         cx.notify();
     }
 
+    /// Opens a Settings sub-page directly.
+    pub fn show_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        self.settings_section = Some(section);
+        self.settings_scroll.set_offset(gpui::point(px(0.), px(0.)));
+        self.show_tab(Tab::Settings, cx);
+        cx.notify();
+    }
+
+    /// Accent color of the theme (the green of the Play button in the default theme).
+    pub fn accent(&self) -> Hsla {
+        self.color("MidiPlayer", "PlayColor")
+    }
+
+    pub fn copy_text(&self, text: String, what: &str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        console::toast(format!("{what} copied"));
+    }
+
+    /// Small colored dot next to a sidebar entry (playing / paused / listening / update).
+    fn nav_badge(&self, tab: Tab) -> Option<Hsla> {
+        let player_dot = |p: &crate::player::Player, section: &str| {
+            p.is_running().then(|| self.color(section, if p.is_paused() { "PausedColor" } else { "PlayingColor" }))
+        };
+        match tab {
+            Tab::Midi => player_dot(&self.core.piano, "MidiPlayer"),
+            Tab::Drums => player_dot(&self.core.drums, "DrumsMacro"),
+            Tab::ToQwerty => self.core.live.is_running().then(|| self.accent()),
+            Tab::Settings => matches!(update::state().status, update::Status::Available | update::Status::Installed).then(|| self.accent()),
+            _ => None,
+        }
+    }
+
     fn nav_button(
         &self,
         id: &'static str,
@@ -581,66 +688,240 @@ impl RootView {
     ) -> gpui::Stateful<gpui::Div> {
         let selected = self.tab == tab;
         let bg = if selected {
-            self.color("Navigation", "TabButtonSelectedColor")
+            pages::shade(self.color("Navigation", "TabButtonSelectedColor"), 0.03)
         } else {
             self.color("Navigation", "TabButtonColor")
         };
         let hover = self.color("Navigation", "TabButtonHoverColor");
+        let accent = self.accent();
         let mut el = div()
             .id(id)
-            .w_full()
-            .h(px(40.))
+            .relative()
+            .mx(px(8.))
+            .h(px(38.))
             .px(px(10.))
+            .rounded(px(10.))
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(px(9.))
             .bg(bg)
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
-            .on_click(cx.listener(move |this, _, _, cx| this.show_tab(tab, cx)));
-        if let Some(icon) = icon {
-            el = el.child(img(icon).w(px(icon_size)).h(px(icon_size)).flex_shrink_0());
+            .on_click(cx.listener(move |this, _, _, cx| {
+                // The sidebar entry always opens the settings overview.
+                if tab == Tab::Settings && this.settings_section.take().is_some() {
+                    this.settings_scroll.set_offset(gpui::point(px(0.), px(0.)));
+                    cx.notify();
+                }
+                this.show_tab(tab, cx)
+            }));
+        if selected {
+            el = el.child(div().absolute().left(px(0.)).top(px(10.)).w(px(3.)).h(px(18.)).rounded_full().bg(accent));
         }
-        el.child(lines(&self.theme, label, 14.0, text_color))
+        let mut content = div().flex().items_center().gap(px(9.)).flex_1().min_w_0().when(!selected, |d| d.opacity(0.72));
+        if let Some(icon) = icon {
+            content = content.child(img(icon).w(px(icon_size)).h(px(icon_size)).flex_shrink_0());
+        }
+        content = content.child(lines(&self.theme, label, 13.0, text_color));
+        el = el.child(content);
+        if let Some(dot) = self.nav_badge(tab) {
+            el = el.child(div().w(px(8.)).h(px(8.)).rounded_full().bg(dot).flex_shrink_0());
+        }
+        el
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> gpui::Div {
         let t = &self.theme;
         let text = self.color("Navigation", "TextColor");
-        let watermark = self.color("Navigation", "WatermarkColor");
         let custom_wm = self.color("Navigation", "CustomWatermarkColor");
-        let mut logo = div().h(px(66.)).flex().items_center().justify_center();
+        let dim = self.color("MidiPlayer", "TextColorDisabled");
+        let mut logo = div().h(px(60.)).flex().items_center().justify_center();
         if let Some(banner) = t.icons.banner.clone() {
             logo = logo.child(img(banner).w(px(86.)).h(px(26.)));
         }
+        let caption = |s: &str| div().px(px(20.)).pt(px(10.)).pb(px(4.)).child(text_label(t, &s.to_uppercase(), 10.0, dim));
         let mut bar = div()
             .w(px(SIDEBAR_W))
             .h_full()
             .flex_shrink_0()
             .flex()
             .flex_col()
+            .gap(px(2.))
             .bg(self.color("Navigation", "BackColor"))
             .child(logo)
-            .child(self.nav_button("nav-midi", "MIDI Player", t.icons.piano.clone(), 20.0, Tab::Midi, text, cx))
-            .child(self.nav_button("nav-drums", "Drums Player", t.icons.drum.clone(), 20.0, Tab::Drums, text, cx))
-            .child(self.nav_button("nav-hub", "MIDI Hub", t.icons.piano.clone(), 20.0, Tab::Hub, text, cx))
-            .child(self.nav_button("nav-qwerty", "MIDI To QWERTY", t.icons.keyboard.clone(), 18.0, Tab::ToQwerty, text, cx))
-            .child(self.nav_button("nav-settings", "Settings", t.icons.cogwheel.clone(), 18.0, Tab::Settings, text, cx))
+            .child(caption("Play"))
+            .child(self.nav_button("nav-midi", "MIDI Player", t.icons.piano.clone(), 18.0, Tab::Midi, text, cx))
+            .child(self.nav_button("nav-drums", "Drums Player", t.icons.drum.clone(), 18.0, Tab::Drums, text, cx))
+            .child(self.nav_button("nav-qwerty", "MIDI To QWERTY", t.icons.keyboard.clone(), 16.0, Tab::ToQwerty, text, cx))
+            .child(caption("Discover"))
+            .child(self.nav_button("nav-hub", "MIDI Hub", t.icons.search.clone().or(t.icons.piano.clone()), 16.0, Tab::Hub, text, cx))
+            .child(caption("App"))
+            .child(self.nav_button("nav-settings", "Settings", t.icons.cogwheel.clone(), 16.0, Tab::Settings, text, cx))
+            .child(self.nav_button("nav-info", "About", t.icons.info.clone(), 16.0, Tab::Info, text, cx))
             .child(div().flex_1());
         for line in [&t.watermark_ln1, &t.watermark_ln2] {
             if !line.is_empty() {
-                bar = bar.child(div().flex().justify_center().child(lines(t, line, 14.0, custom_wm)));
+                bar = bar.child(div().flex().justify_center().child(lines(t, line, 12.0, custom_wm)));
             }
         }
-        bar.child(self.nav_button(
-            "nav-info",
-            &format!("nanoMIDIPlayer\n{APP_VERSION}"),
-            t.icons.info.clone(),
-            18.0,
-            Tab::Info,
-            watermark,
-            cx,
-        ))
+        // Version + update hint at the bottom.
+        let (status, latest) = {
+            let st = update::state();
+            (st.status.clone(), st.latest.as_ref().map(|r| r.version.clone()))
+        };
+        let (line2, color) = match status {
+            update::Status::Available => (format!("{} available", latest.unwrap_or_default()), self.accent()),
+            update::Status::Downloading(_) => ("Updating…".to_string(), self.accent()),
+            update::Status::Installed => ("Restart to update".to_string(), self.accent()),
+            _ => ("Up to date".to_string(), dim),
+        };
+        let show_line2 = matches!(
+            status,
+            update::Status::Available | update::Status::Downloading(_) | update::Status::Installed | update::Status::UpToDate
+        );
+        let hover = self.color("Navigation", "TabButtonHoverColor");
+        bar.child(
+            div()
+                .id("nav-version")
+                .mx(px(8.))
+                .mb(px(8.))
+                .px(px(10.))
+                .py(px(6.))
+                .rounded(px(10.))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .flex()
+                .flex_col()
+                .child(text_label(t, &format!("nanoMIDIPlayer {APP_VERSION}"), 11.0, dim))
+                .when(show_line2, |d| d.child(text_label(t, &line2, 10.0, color)))
+                .on_click(cx.listener(|this, _, _, cx| this.show_settings(SettingsSection::Updates, cx))),
+        )
+    }
+
+    /// Bar above the page while an update is available, downloading or installed.
+    fn update_banner(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let (status, latest, dismissed) = {
+            let st = update::state();
+            (st.status.clone(), st.latest.clone(), st.dismissed)
+        };
+        if dismissed || (self.tab == Tab::Settings && self.settings_section == Some(SettingsSection::Updates)) {
+            return None;
+        }
+        let version = latest.as_ref().map(|r| r.version.clone()).unwrap_or_default();
+        let s = "MidiPlayer";
+        let text_c = self.color(s, "TextColor");
+        let dim = self.color(s, "TextColorDisabled");
+        let small = |id: &'static str, label: &str, primary: bool, cx: &mut Context<Self>, f: fn(&mut Self, &mut Context<Self>)| {
+            button(
+                &self.theme,
+                ButtonSpec {
+                    id: id.into(),
+                    label: label.to_string().into(),
+                    width: (label.chars().count() as f32 * 8.0 + 24.0).max(60.0),
+                    height: 26.0,
+                    enabled: true,
+                    colors: if primary {
+                        self.button_colors(s, "PlayColor", "PlayColorHover")
+                    } else {
+                        self.button_colors(s, "ButtonColor", "ButtonHoverColor")
+                    },
+                    icon: None,
+                },
+                Self::click(cx, move |this, _, cx| f(this, cx)),
+            )
+            .rounded_full()
+            .into_any_element()
+        };
+        let (message, actions): (String, Vec<gpui::AnyElement>) = match status {
+            update::Status::Available => (
+                format!("Update {version} available"),
+                vec![
+                    small("upd-now", "Update now", true, cx, |_, _| update::install()),
+                    small("upd-details", "Details", false, cx, |this, cx| this.show_settings(SettingsSection::Updates, cx)),
+                ],
+            ),
+            update::Status::Downloading(p) => (
+                match p {
+                    Some(p) => format!("Downloading {version}… {}%", (p * 100.0).round() as u32),
+                    None => format!("Downloading {version}…"),
+                },
+                Vec::new(),
+            ),
+            update::Status::Installed => (
+                format!("{version} is installed"),
+                vec![small("upd-restart", "Restart now", true, cx, |this, cx| this.restart_app(cx))],
+            ),
+            _ => return None,
+        };
+        let close = div()
+            .id("upd-close")
+            .w(px(24.))
+            .h(px(24.))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|s| s.bg(gpui::rgba(0xffffff14)))
+            .child(text_label(&self.theme, "✕", 11.0, dim))
+            .on_click(cx.listener(|_, _, _, cx| {
+                update::dismiss();
+                cx.notify();
+            }));
+        let mut row = div()
+            .mx(px(12.))
+            .mt(px(10.))
+            .px(px(12.))
+            .py(px(8.))
+            .rounded(px(12.))
+            .bg(pages::shade(self.color(s, "BackgroundColor"), 0.05))
+            .border_1()
+            .border_color(self.accent())
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.))
+            .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(self.accent()))
+            .child(div().flex_1().min_w(px(120.)).child(text_label(&self.theme, &message, 12.0, text_c)));
+        for a in actions {
+            row = row.child(a);
+        }
+        Some(row.child(close))
+    }
+
+    /// Quits and starts the (updated) app again.
+    pub fn restart_app(&mut self, cx: &mut Context<Self>) {
+        if update::relaunch() {
+            self.core.shutdown();
+            cx.quit();
+        } else {
+            console::toast("Couldn't restart. Please start the app again.");
+        }
+    }
+
+    fn toast(&self) -> Option<gpui::Div> {
+        let msg = console::current_toast()?;
+        Some(
+            div()
+                .absolute()
+                .bottom(px(14.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .max_w(px(380.))
+                        .px(px(14.))
+                        .py(px(8.))
+                        .rounded_full()
+                        .bg(pages::shade(self.color("Navigation", "BackColor"), 0.06))
+                        .border_1()
+                        .border_color(self.accent())
+                        .shadow_lg()
+                        .child(text_label(&self.theme, &msg, 12.0, self.color("MidiPlayer", "TextColor"))),
+                ),
+        )
     }
 
     fn apply_topmost(&mut self, window: &Window) {
@@ -696,23 +977,65 @@ impl Render for RootView {
             Tab::Settings => self.settings_page(window, cx).into_any_element(),
             Tab::Info => self.info_page(window, cx).into_any_element(),
         };
+        let banner = self.update_banner(cx);
+        let toast = self.toast();
+        let menu = self.render_menu(cx);
+        let page_bg = self.color(
+            match self.tab {
+                Tab::Midi => "MidiPlayer",
+                Tab::Drums => "DrumsMacro",
+                Tab::Hub => "MIDIHub",
+                Tab::ToQwerty => "MidiToQWERTY",
+                Tab::Settings | Tab::Info => "Settings",
+            },
+            "BackgroundColor",
+        );
+        let content = div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .bg(page_bg)
+            .when_some(banner, |d, b| d.child(b))
+            .child(div().flex_1().min_h_0().child(page))
+            .when_some(toast, |d, t| d.child(t));
         div()
             .id("root")
             .size_full()
             .flex()
             .flex_col()
-            .font_family(self.theme.font.clone())
+            .font_family(self.theme.ui_font.clone())
             .bg(self.color("MidiPlayer", "BackgroundColor"))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
                     window.blur();
-                    if this.open_drop.take().is_some() {
+                    let closed_menu = this.close_menu();
+                    if this.open_drop.take().is_some() || closed_menu {
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    if this.close_menu() {
                         cx.notify();
                     }
                 }),
             )
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                if this.scrub.is_some() {
+                    if ev.pressed_button == Some(MouseButton::Left) {
+                        this.scrub_to(ev.position.x);
+                    } else {
+                        this.finish_scrub();
+                    }
+                    cx.notify();
+                }
                 if this.drag.is_some() {
                     if ev.pressed_button == Some(MouseButton::Left) {
                         this.drag_to(ev.position.x);
@@ -723,19 +1046,13 @@ impl Render for RootView {
                 }
             }))
             .capture_any_mouse_up(cx.listener(|this, _, _, cx| {
-                if this.drag.take().is_some() {
+                if this.drag.take().is_some() | this.finish_scrub() {
                     cx.notify();
                 }
             }))
             .child(self.titlebar(window))
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.sidebar(cx))
-                    .child(div().relative().flex_1().min_w_0().h_full().overflow_hidden().child(page)),
-            )
+            .child(div().flex().flex_1().min_h_0().child(self.sidebar(cx)).child(content))
+            .when_some(menu, |d, m| d.child(m))
     }
 }
 

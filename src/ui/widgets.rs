@@ -1,4 +1,4 @@
-//! CustomTkinter-look widgets built from GPUI primitives.
+//! Widgets built from GPUI primitives (system UI font, theme colors).
 
 use std::rc::Rc;
 
@@ -19,8 +19,8 @@ pub const ROW_H: f32 = 28.0;
 /// Base text element: bold theme font at the given size.
 pub fn text(theme: &Theme, s: impl Into<SharedString>, size: f32, color: Hsla) -> Div {
     div()
-        .font_family(theme.font.clone())
-        .font_weight(FontWeight::BOLD)
+        .font_family(theme.ui_font.clone())
+        .font_weight(FontWeight::MEDIUM)
         .text_size(px(size))
         .line_height(px(size + 4.0))
         .text_color(color)
@@ -32,8 +32,8 @@ pub fn lines(theme: &Theme, s: &str, size: f32, color: Hsla) -> Div {
     let mut d = div()
         .flex()
         .flex_col()
-        .font_family(theme.font.clone())
-        .font_weight(FontWeight::BOLD)
+        .font_family(theme.ui_font.clone())
+        .font_weight(FontWeight::MEDIUM)
         .text_size(px(size))
         .line_height(px(size + 4.0))
         .text_color(color);
@@ -43,11 +43,28 @@ pub fn lines(theme: &Theme, s: &str, size: f32, color: Hsla) -> Div {
     d
 }
 
+/// Like [`lines`], but long lines wrap to the available width.
+pub fn paragraph(theme: &Theme, s: &str, size: f32, color: Hsla) -> Div {
+    let mut d = div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .font_family(theme.ui_font.clone())
+        .font_weight(FontWeight::NORMAL)
+        .text_size(px(size))
+        .line_height(px(size + 4.0))
+        .text_color(color);
+    for line in s.split('\n') {
+        d = d.child(div().child(SharedString::from(line.to_string())));
+    }
+    d
+}
+
 pub fn with_tooltip(el: Stateful<Div>, enabled: bool, text: &'static str, theme: &Theme) -> Stateful<Div> {
     if !enabled || text.is_empty() {
         return el;
     }
-    let font = theme.font.clone();
+    let font = theme.ui_font.clone();
     el.tooltip(move |_window, cx| {
         let font = font.clone();
         cx.new(|_| TooltipView { text, font }).into()
@@ -69,7 +86,7 @@ impl Render for TooltipView {
             .border_color(gpui::rgb(0x000000))
             .px(px(2.))
             .font_family(self.font.clone())
-            .font_weight(FontWeight::BOLD)
+            .font_weight(FontWeight::NORMAL)
             .text_size(px(14.))
             .line_height(px(18.))
             .text_color(gpui::white())
@@ -321,8 +338,8 @@ fn chevron(color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
-/// Shortens `s` with "…" to fit `max_w` pixels. The theme font is monospace
-/// (one character ≈ 0.55 em); GPUI's own `truncate()` measures too early in flex
+/// Shortens `s` with "…" to fit `max_w` pixels, estimating ~0.55 em per character
+/// (generous for the UI font); GPUI's own `truncate()` measures too early in flex
 /// layouts and would cut everything.
 pub fn ellipsize(s: &str, size: f32, max_w: f32) -> String {
     let max_chars = ((max_w / (size * 0.55)).floor() as usize).max(4);

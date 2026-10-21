@@ -24,7 +24,7 @@ pub enum Tab {
     Info,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
     Midi,
     Drums,
@@ -234,6 +234,50 @@ impl Core {
         });
     }
 
+    /// Whether removing `path` from the list deletes the file: downloads live in the
+    /// app's own folders and would otherwise reappear on the next scan.
+    pub fn removal_deletes_file(path: &str) -> bool {
+        let p = Path::new(path);
+        p.starts_with(crate::hub::recent_dir()) || p.starts_with(config::midis_dir())
+    }
+
+    /// Takes one song out of the dropdown (deleting it if it is a download).
+    pub fn remove_file(&self, target: Target, path: &str) {
+        let is_current = {
+            let state = self.state.lock();
+            Self::files_ref(&state, target).current.as_deref() == Some(path)
+        };
+        if is_current {
+            self.stop(target);
+        }
+        if Self::removal_deletes_file(path) {
+            let _ = std::fs::remove_file(path);
+        }
+        config::get().update(|c| {
+            let (list, current) = match target {
+                Target::Midi => (&mut c.midi_player.midi_list, &mut c.midi_player.current_file),
+                Target::Drums => (&mut c.drums.midi_list, &mut c.drums.current_file),
+            };
+            list.retain(|f| f != path);
+            if current == path {
+                current.clear();
+            }
+        });
+        self.load_saved_files(target);
+        console::insert(format!("Removed {}", Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+    }
+
+    fn files_ref(state: &CoreState, target: Target) -> &FileList {
+        match target {
+            Target::Midi => &state.midi,
+            Target::Drums => &state.drums,
+        }
+    }
+
+    pub fn current_file(&self, target: Target) -> Option<String> {
+        Self::files_ref(&self.state.lock(), target).current.clone()
+    }
+
     pub fn clear_list(&self, target: Target) {
         config::get().update(|c| match target {
             Target::Midi => {
@@ -348,6 +392,20 @@ impl Core {
     pub fn stop(&self, target: Target) {
         self.player(target).stop();
         self.bump();
+    }
+
+    /// Jumps to `fraction` (0..1) of the running song.
+    pub fn seek(&self, target: Target, fraction: f64) {
+        let player = self.player(target);
+        let (_, len) = player.position();
+        player.seek(len * fraction.clamp(0.0, 1.0));
+        self.bump();
+    }
+
+    /// Starts the current song again from the beginning.
+    pub fn restart(&self, target: Target) {
+        self.stop(target);
+        self.start(target);
     }
 
     pub fn set_speed(&self, target: Target, percent: f64) {
