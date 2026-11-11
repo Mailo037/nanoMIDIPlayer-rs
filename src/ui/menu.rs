@@ -7,13 +7,14 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, ElementId, MouseButton, MouseDownEvent, Pixels, Point, Window, anchored, deferred, div, px};
 
 use super::RootView;
+use super::icons::{Icon, icon};
 use super::widgets::*;
 
 pub type MenuAction = Rc<dyn Fn(&mut RootView, &mut Window, &mut Context<RootView>)>;
 
 pub enum MenuItem {
     Action {
-        icon: &'static str,
+        icon: Option<Icon>,
         label: String,
         hint: String,
         enabled: bool,
@@ -26,9 +27,9 @@ pub enum MenuItem {
 }
 
 impl MenuItem {
-    pub fn new(icon: &'static str, label: impl Into<String>, action: impl Fn(&mut RootView, &mut Window, &mut Context<RootView>) + 'static) -> Self {
+    pub fn new(icon: Icon, label: impl Into<String>, action: impl Fn(&mut RootView, &mut Window, &mut Context<RootView>) + 'static) -> Self {
         MenuItem::Action {
-            icon,
+            icon: Some(icon),
             label: label.into(),
             hint: String::new(),
             enabled: true,
@@ -40,9 +41,10 @@ impl MenuItem {
 
     /// Item with a checkmark column (for on/off settings).
     pub fn check(label: impl Into<String>, on: bool, action: impl Fn(&mut RootView, &mut Window, &mut Context<RootView>) + 'static) -> Self {
-        let mut item = Self::new("", label, action);
-        if let MenuItem::Action { checked, .. } = &mut item {
+        let mut item = Self::new(Icon::Check, label, action);
+        if let MenuItem::Action { checked, icon, .. } = &mut item {
             *checked = Some(on);
+            *icon = None;
         }
         item
     }
@@ -136,25 +138,24 @@ impl RootView {
                     .px(px(10.))
                     .pt(px(6.))
                     .pb(px(2.))
-                    .child(text(&self.theme, t.clone(), 11.0, dim).font_weight(gpui::FontWeight::SEMIBOLD))
+                    .child(text(&self.theme, t.clone(), 11.0, dim))
                     .into_any_element(),
-                MenuItem::Action { icon, label, hint, enabled, danger: is_danger, checked, .. } => {
+                MenuItem::Action { icon: glyph, label, hint, enabled, danger: is_danger, checked, .. } => {
                     let color = if !enabled { dim } else if *is_danger { danger } else { text_c };
-                    let lead: String = match checked {
-                        Some(true) => "✓".into(),
-                        Some(false) => "".into(),
-                        None => icon.to_string(),
+                    let lead = match checked {
+                        Some(true) => Some(icon(Icon::Check, 15.0, accent)),
+                        Some(false) => None,
+                        None => glyph.map(|g| icon(g, 15.0, color)),
                     };
-                    let lead_color = if checked.is_some() { accent } else { color };
                     div()
                         .id(ElementId::NamedInteger("menu-item".into(), i as u64))
-                        .h(px(30.))
+                        .h(px(32.))
                         .px(px(8.))
                         .rounded(px(8.))
                         .flex()
                         .items_center()
                         .gap(px(8.))
-                        .child(div().w(px(18.)).flex().justify_center().child(text(&self.theme, lead, 13.0, lead_color)))
+                        .child(div().w(px(18.)).flex().justify_center().when_some(lead, |d, l| d.child(l)))
                         .child(div().flex_1().min_w_0().overflow_hidden().child(text(&self.theme, ellipsize(label, 13.0, 250.0), 13.0, color).font_weight(gpui::FontWeight::NORMAL).whitespace_nowrap()))
                         .when(!hint.is_empty(), |d| d.child(text(&self.theme, hint.clone(), 11.0, dim).whitespace_nowrap()))
                         .when(*enabled, |d| {

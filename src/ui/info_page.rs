@@ -289,8 +289,8 @@ impl RootView {
                     .flex()
                     .flex_wrap()
                     .gap(px(8.))
-                    .child(link("fork-original", "Original nanoMIDIPlayer »", super::UPSTREAM_REPO, true))
-                    .child(link("fork-repo", "This Rust fork »", super::FORK_REPO, false)),
+                    .child(link("fork-original", "Original nanoMIDIPlayer", super::UPSTREAM_REPO, true))
+                    .child(link("fork-repo", "This Rust fork", super::FORK_REPO, false)),
             )
     }
 
@@ -302,7 +302,7 @@ impl RootView {
             .flex_col()
             .gap(px(8.))
             .p(px(20.))
-            .font_family("Segoe UI")
+            .font_family(self.theme.ui_font.clone())
             .text_color(white);
         body = body.child(self.fork_banner());
         let guard = self.info.lock();
@@ -326,7 +326,7 @@ impl RootView {
                             .bg(rgb(0x2e2e2e))
                             .rounded(px(5.))
                             .p(px(5.))
-                            .font_family("Consolas")
+                            .font_family(self.theme.font.clone())
                             .text_size(px(13.))
                             .child(SharedString::from(code.clone())),
                         Block::Rule => div().h(px(1.)).w_full().bg(rgb(0x444444)),

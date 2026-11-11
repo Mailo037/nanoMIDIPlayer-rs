@@ -71,13 +71,26 @@ pub fn reveal(path: &std::path::Path) {
             .raw_arg(format!("/select,\"{}\"", path.display()))
             .spawn();
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         if let Some(dir) = path.parent() {
             open_url(&dir.to_string_lossy());
         }
     }
 }
+
+/// Name of the system file manager, for menu labels.
+pub const FILE_MANAGER: &str = if cfg!(windows) {
+    "Explorer"
+} else if cfg!(target_os = "macos") {
+    "Finder"
+} else {
+    "file manager"
+};
 
 /// Opens a folder in the file manager.
 pub fn open_folder(dir: &std::path::Path) {

@@ -17,15 +17,8 @@ pub const REMOTE_THEME_LIST: &str =
 
 #[derive(Clone, Default)]
 pub struct Icons {
+    /// Logo shown at the top of the sidebar.
     pub banner: Option<Arc<Image>>,
-    pub reset: Option<Arc<Image>>,
-    pub piano: Option<Arc<Image>>,
-    pub drum: Option<Arc<Image>>,
-    pub download: Option<Arc<Image>>,
-    pub search: Option<Arc<Image>>,
-    pub cogwheel: Option<Arc<Image>>,
-    pub keyboard: Option<Arc<Image>>,
-    pub info: Option<Arc<Image>>,
 }
 
 pub struct Theme {
@@ -160,17 +153,7 @@ impl Theme {
                 .and_then(decode_image)
                 .or_else(|| dt["Icons"][name].as_str().and_then(decode_image))
         };
-        let icons = Icons {
-            banner: icon("banner"),
-            reset: icon("reset"),
-            piano: icon("piano"),
-            drum: icon("drum"),
-            download: icon("download"),
-            search: icon("search"),
-            cogwheel: icon("cogwheel"),
-            keyboard: icon("keyboard"),
-            info: icon("info"),
-        };
+        let icons = Icons { banner: icon("banner") };
 
         let nav = &t["Navigation"];
         Ok(Theme {

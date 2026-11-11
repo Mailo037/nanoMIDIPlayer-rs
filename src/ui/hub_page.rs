@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use gpui::prelude::*;
 use gpui::{Context, Div, ElementId, MouseButton, Window, div, img, px};
 
+use super::icons::{Icon, icon};
 use super::widgets::*;
 use super::{DropId, EntryId, MenuItem, RootView};
 use crate::{console, net};
@@ -91,7 +92,7 @@ impl RootView {
     /// Favorite, preview, open-page and download buttons for one song (`size` = button edge).
     fn hub_actions(&self, index: usize, midi: &hub::HubMidi, key: &str, size: f32, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let mut out = Vec::new();
-        let icon_size = (size * 0.64).round();
+        let icon_size = (size * 0.5).round();
 
         let favorite = self.hub.lock().is_favorite(key);
         let fav_key = key.to_string();
@@ -104,12 +105,12 @@ impl RootView {
             &self.theme,
             ButtonSpec {
                 id: ElementId::NamedInteger("hub-fav".into(), index as u64),
-                label: if favorite { "★" } else { "☆" }.into(),
+                label: "".into(),
                 width: size,
                 height: size,
                 enabled: true,
                 colors: self.button_colors(S, fav_bg, fav_hover),
-                icon: None,
+                icon: Some((if favorite { Icon::StarFilled } else { Icon::Star }, icon_size)),
             },
             Self::click(cx, move |this, _, cx| {
                 this.hub.lock().toggle_favorite(fav_key.clone());
@@ -117,14 +118,14 @@ impl RootView {
                 cx.notify();
             }),
         );
-        out.push(with_tooltip(fav, self.tooltips(), if favorite { "Remove from Favorites" } else { "Add to Favorites" }, &self.theme).into_any_element());
+        out.push(with_tooltip(fav, self.tooltips(), if favorite { "Remove from favorites" } else { "Add to favorites" }, &self.theme).into_any_element());
 
         if let Some(file) = midi.midi_filename.clone().filter(|f| !f.is_empty()) {
             let state = self.preview.state_of(key);
-            let (label, tooltip) = match state {
-                Some(PreviewState::Loading) => ("…", "Loading preview..."),
-                Some(PreviewState::Playing) => ("■", "Stop Preview"),
-                None => ("▶", "Preview (first 30 seconds)"),
+            let (label, glyph, tooltip) = match state {
+                Some(PreviewState::Loading) => ("…", None, "Loading the preview…"),
+                Some(PreviewState::Playing) => ("", Some(Icon::Stop), "Stop the preview"),
+                None => ("", Some(Icon::Play), "Listen to the first 30 seconds"),
             };
             let preview_key = key.to_string();
             let play = button(
@@ -140,7 +141,7 @@ impl RootView {
                         if state.is_some() { "DownloadButtonColor" } else { "NextButtonColor" },
                         if state.is_some() { "DownloadButtonHoverColor" } else { "NextButtonHoverColor" },
                     ),
-                    icon: None,
+                    icon: glyph.map(|g| (g, icon_size)),
                 },
                 Self::click(cx, move |this, _, cx| {
                     if this.preview.state_of(&preview_key).is_some() {
@@ -160,12 +161,12 @@ impl RootView {
                 &self.theme,
                 ButtonSpec {
                     id: ElementId::NamedInteger("hub-open".into(), index as u64),
-                    label: "»".into(),
+                    label: "".into(),
                     width: size,
                     height: size,
                     enabled: true,
                     colors: self.button_colors(S, "NextButtonColor", "NextButtonHoverColor"),
-                    icon: None,
+                    icon: Some((Icon::External, icon_size)),
                 },
                 Self::click(cx, move |_, _, _| net::open_url(&url)),
             );
@@ -182,11 +183,11 @@ impl RootView {
                     height: size,
                     enabled: true,
                     colors: self.button_colors(S, "DownloadButtonColor", "DownloadButtonHoverColor"),
-                    icon: self.theme.icons.download.clone().map(|i| (i, icon_size)),
+                    icon: Some((Icon::Download, icon_size)),
                 },
                 Self::click(cx, move |this, _, cx| this.hub_load(file.clone(), false, cx)),
             );
-            out.push(with_tooltip(dl, self.tooltips(), "Download and open in MIDI Player", &self.theme).into_any_element());
+            out.push(with_tooltip(dl, self.tooltips(), "Download and open under Play a song", &self.theme).into_any_element());
         }
         out
     }
@@ -194,6 +195,15 @@ impl RootView {
     /// One line of card text, shortened with "…" to `max_w` (see [`ellipsize`]).
     fn card_line(&self, s: &str, size: f32, max_w: f32) -> Div {
         text(&self.theme, ellipsize(s, size, max_w), size, self.color(S, "TextColor")).whitespace_nowrap().overflow_hidden()
+    }
+
+    /// Secondary card text (artist, arranger, uploader): smaller and dimmer than the title.
+    fn card_detail(&self, s: &str, size: f32, max_w: f32, strength: f32) -> Div {
+        let c = self.color(S, "TextColor");
+        text(&self.theme, ellipsize(s, size, max_w), size, gpui::Hsla { a: c.a * strength, ..c })
+            .font_weight(gpui::FontWeight::NORMAL)
+            .whitespace_nowrap()
+            .overflow_hidden()
     }
 
     fn cover(&self, image: Option<std::sync::Arc<gpui::Image>>, size: f32) -> Div {
@@ -215,21 +225,21 @@ impl RootView {
     fn hub_card(&self, index: usize, midi: &hub::HubMidi, image: Option<std::sync::Arc<gpui::Image>>, width: f32, cx: &mut Context<Self>) -> Div {
         let key = midi.key();
         let slot = slots::slot_of(&key);
-        let arranger = midi.arranger.as_deref().filter(|a| !a.is_empty()).unwrap_or("N/A");
+        let arranger = midi.arranger.as_deref().filter(|a| !a.is_empty()).unwrap_or("unknown");
         let hotkey = slot.map(|n| format!("Hotkey: Alt+{}", n + 1));
 
         // Right-click opens the song menu (play, download, favorite, hotkey slot, …).
         let menu_song = midi.clone();
         let base = div()
             .on_mouse_down(MouseButton::Right, Self::menu_trigger(cx, move |this| this.hub_song_menu(&menu_song)))
-            .rounded(px(14.))
+            .rounded(px(R_CARD))
             .bg(self.color(S, "MidiCardBackColor"))
             .overflow_hidden();
 
         let card = match self.hub_view {
             super::HubView::List => {
                 // card padding 16 + cover 92 + gaps 28 + buttons 64
-                let text_w = width - 208.0;
+                let text_w = width - 212.0;
                 let mut info = div()
                     .flex_1()
                     .min_w_0()
@@ -238,9 +248,9 @@ impl RootView {
                     .justify_center()
                     .gap(px(4.))
                     .child(self.card_line(&midi.name, 15.0, text_w))
-                    .child(self.card_line(&midi.artists, 12.0, text_w))
-                    .child(self.card_line(&format!("Arr: {arranger}"), 11.0, text_w))
-                    .child(self.card_line(&format!("Uploader: {}", midi.uploader), 11.0, text_w));
+                    .child(self.card_detail(&midi.artists, 12.0, text_w, 0.8))
+                    .child(self.card_detail(&format!("Arranged by {arranger}"), 11.0, text_w, 0.55))
+                    .child(self.card_detail(&format!("Uploaded by {}", midi.uploader), 11.0, text_w, 0.55));
                 if let Some(h) = &hotkey {
                     info = info.child(text(&self.theme, h.clone(), 11.0, self.color(S, "DownloadButtonColor")));
                 }
@@ -251,14 +261,14 @@ impl RootView {
                 base.flex()
                     .items_center()
                     .gap(px(14.))
-                    .p(px(8.))
+                    .p(px(10.))
                     .child(self.cover(image, 92.0))
                     .child(info)
                     .child(actions)
             }
             super::HubView::Compact => {
                 // padding 12 + cover 40 + gaps 20 + up to four 26 px buttons
-                let text_w = width - 196.0;
+                let text_w = width - 200.0;
                 let mut actions = div().flex_shrink_0().flex().items_center().gap(px(4.));
                 for a in self.hub_actions(index, midi, &key, 26.0, cx) {
                     actions = actions.child(a);
@@ -270,7 +280,7 @@ impl RootView {
                 base.flex()
                     .items_center()
                     .gap(px(10.))
-                    .p(px(6.))
+                    .p(px(8.))
                     .child(self.cover(image, 40.0))
                     .child(
                         div()
@@ -280,7 +290,7 @@ impl RootView {
                             .flex_col()
                             .gap(px(2.))
                             .child(self.card_line(&midi.name, 13.0, text_w))
-                            .child(self.card_line(&subtitle, 11.0, text_w)),
+                            .child(self.card_detail(&subtitle, 11.0, text_w, 0.6)),
                     )
                     .child(actions)
             }
@@ -298,7 +308,7 @@ impl RootView {
                     .p(px(8.))
                     .child(self.cover(image, tile_w - 16.0))
                     .child(self.card_line(&midi.name, 13.0, tile_w - 16.0))
-                    .child(self.card_line(&midi.artists, 11.0, tile_w - 16.0))
+                    .child(self.card_detail(&midi.artists, 11.0, tile_w - 16.0, 0.6))
                     .child(actions)
             }
         };
@@ -322,7 +332,7 @@ impl RootView {
                     core.start(Target::Midi);
                     console::toast("Playing — click into your game");
                 } else {
-                    console::toast("Song loaded in the MIDI Player");
+                    console::toast("Song loaded");
                 }
             }
             Err(e) => {
@@ -348,9 +358,9 @@ impl RootView {
         let (u1, u2) = (url.clone().unwrap_or_default(), url.clone().unwrap_or_default());
         let mut items = vec![
             MenuItem::title(ellipsize(&title, 10.0, 240.0)),
-            MenuItem::new("▶", "Play now", move |this, _, cx| this.hub_load(f1.clone(), true, cx)).enabled(has_file),
-            MenuItem::new("⬇", "Load into MIDI Player", move |this, _, cx| this.hub_load(f2.clone(), false, cx)).enabled(has_file),
-            MenuItem::new(if previewing { "■" } else { "♪" }, if previewing { "Stop preview" } else { "Preview (30 s)" }, move |this, _, cx| {
+            MenuItem::new(Icon::Play, "Play now", move |this, _, cx| this.hub_load(f1.clone(), true, cx)).enabled(has_file),
+            MenuItem::new(Icon::Download, "Load without playing", move |this, _, cx| this.hub_load(f2.clone(), false, cx)).enabled(has_file),
+            MenuItem::new(if previewing { Icon::Stop } else { Icon::Music }, if previewing { "Stop the preview" } else { "Listen to the first 30 seconds" }, move |this, _, cx| {
                 if this.preview.state_of(&k1).is_some() {
                     this.preview.stop();
                 } else {
@@ -361,13 +371,13 @@ impl RootView {
             })
             .enabled(has_file),
             MenuItem::Separator,
-            MenuItem::new(if favorite { "★" } else { "☆" }, if favorite { "Remove from favorites" } else { "Add to favorites" }, move |this, _, cx| {
+            MenuItem::new(if favorite { Icon::StarFilled } else { Icon::Star }, if favorite { "Remove from favorites" } else { "Add to favorites" }, move |this, _, cx| {
                 this.hub.lock().toggle_favorite(k2.clone());
                 console::toast(if favorite { "Removed from favorites" } else { "Added to favorites" });
                 this.hub_version.fetch_add(1, Ordering::Release);
                 cx.notify();
             }),
-            MenuItem::new("⌥", match slot { Some(n) => format!("Hotkey: Alt+{} (change…)", n + 1), None => "Assign hotkey Alt+1…9…".into() }, move |this, _, cx| {
+            MenuItem::new(Icon::Keycap, match slot { Some(n) => format!("Hotkey: Alt+{} (change…)", n + 1), None => "Assign a hotkey (Alt+1 to 9)…".into() }, move |this, _, cx| {
                 this.slot_picker = Some(k3.clone());
                 this.hub_version.fetch_add(1, Ordering::Release);
                 cx.notify();
@@ -375,7 +385,7 @@ impl RootView {
             .enabled(has_file),
         ];
         if let Some(n) = slot {
-            items.push(MenuItem::new("✕", format!("Remove hotkey Alt+{}", n + 1), move |this, _, cx| {
+            items.push(MenuItem::new(Icon::Close, format!("Remove hotkey Alt+{}", n + 1), move |this, _, cx| {
                 slots::clear_song(&k4);
                 console::toast(format!("Alt+{} cleared", n + 1));
                 this.hub_version.fetch_add(1, Ordering::Release);
@@ -384,9 +394,9 @@ impl RootView {
         }
         items.extend([
             MenuItem::Separator,
-            MenuItem::new("»", "Open on nanomidi.net", move |_, _, _| net::open_url(&u1)).enabled(url.is_some()),
-            MenuItem::new("⧉", "Copy link", move |this, _, cx| this.copy_text(u2.clone(), "Link", cx)).enabled(url.is_some()),
-            MenuItem::new("⧉", "Copy song name", move |this, _, cx| this.copy_text(title.clone(), "Song name", cx)),
+            MenuItem::new(Icon::External, "Open on nanomidi.net", move |_, _, _| net::open_url(&u1)).enabled(url.is_some()),
+            MenuItem::new(Icon::Copy, "Copy link", move |this, _, cx| this.copy_text(u2.clone(), "Link", cx)).enabled(url.is_some()),
+            MenuItem::new(Icon::Copy, "Copy song name", move |this, _, cx| this.copy_text(title.clone(), "Song name", cx)),
         ]);
         items
     }
@@ -399,9 +409,9 @@ impl RootView {
         let text_c = self.color(S, "TextColor");
         let mut row = div().flex().rounded_full().bg(off).p(px(2.)).gap(px(2.));
         for (i, (glyph, mode, tip)) in [
-            ("☰", super::HubView::List, "List"),
-            ("≡", super::HubView::Compact, "Compact list"),
-            ("▦", super::HubView::Grid, "Grid"),
+            (Icon::ViewList, super::HubView::List, "Large cards"),
+            (Icon::ViewCompact, super::HubView::Compact, "Compact list"),
+            (Icon::ViewGrid, super::HubView::Grid, "Grid"),
         ]
         .into_iter()
         .enumerate()
@@ -409,17 +419,15 @@ impl RootView {
             let selected = self.hub_view == mode;
             let seg = div()
                 .id(ElementId::NamedInteger("hub-view".into(), i as u64))
-                .w(px(30.))
-                .h(px(24.))
+                .w(px(32.))
+                .h(px(26.))
                 .rounded_full()
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(13.))
-                .text_color(text_c)
                 .when(selected, |d| d.bg(on))
                 .when(!selected, |d| d.cursor_pointer().hover(move |s| s.bg(hover)))
-                .child(glyph)
+                .child(icon(glyph, 14.0, text_c))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.hub_view = mode;
                     this.slot_picker = None;
@@ -435,9 +443,8 @@ impl RootView {
     fn slot_picker_row(&self, midi: &hub::HubMidi, current: Option<usize>, cx: &mut Context<Self>) -> Div {
         let text_color = self.color(S, "TextColor");
         let mut row = div()
-            .mx(px(20.))
             .p(px(6.))
-            .rounded(px(6.))
+            .rounded(px(R_CONTROL))
             .bg(self.color(S, "PageControlFrameBackground"))
             .flex()
             .items_center()
@@ -480,12 +487,12 @@ impl RootView {
             &self.theme,
             ButtonSpec {
                 id: "hub-slot-close".into(),
-                label: "×".into(),
+                label: "".into(),
                 width: 26.0,
                 height: 26.0,
                 enabled: true,
                 colors: self.button_colors(S, "PreviousButtonColor", "PreviousButtonHoverColor"),
-                icon: None,
+                icon: Some((Icon::Close, 13.0)),
             },
             Self::click(cx, |this, _, cx| {
                 this.slot_picker = None;
@@ -508,11 +515,11 @@ impl RootView {
             ButtonSpec {
                 id: id.into(),
                 label: label.into(),
-                width: 92.0,
-                height: 24.0,
+                width: 0.0,
+                height: 26.0,
                 enabled: true,
                 colors,
-                icon: None,
+                icon: favorites.then_some((Icon::Star, 13.0)),
             },
             Self::click(cx, move |this, _, cx| {
                 {
@@ -528,6 +535,7 @@ impl RootView {
                 cx.notify();
             }),
         )
+        .rounded_full()
     }
 
     pub fn hub_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -547,11 +555,11 @@ impl RootView {
             ButtonSpec {
                 id: "hub-search".into(),
                 label: "".into(),
-                width: 28.0,
-                height: 28.0,
+                width: ROW_H,
+                height: ROW_H,
                 enabled: true,
                 colors: self.button_colors(S, "SearchButtonColor", "SearchButtonHoverColor"),
-                icon: self.theme.icons.search.clone().map(|i| (i, 18.0)),
+                icon: Some((Icon::Search, 16.0)),
             },
             Self::click(cx, |this, window, cx| {
                 let q = this.entries.get(&EntryId::Search).filter(|e| e.editing).map(|e| e.buffer.clone());
@@ -574,15 +582,14 @@ impl RootView {
             .unwrap_or(0)];
         let sort_colors = DropdownColors {
             bg: self.color(S, "SortOptionBackColor"),
-            button: self.color(S, "SortOptionDropdownButtonColor"),
-            button_hover: self.color(S, "SortOptionDropdownButtonHoverColor"),
+            hover: super::pages::shade(self.color(S, "SortOptionBackColor"), 0.05),
             menu_bg: self.color(S, "SortOptionDropdownBackground"),
             item_hover: self.color(S, "SortOptionDropdownItemHover"),
             text: text_color,
             text_disabled: text_color,
             border: Some(self.color(S, "SortOptionBorderColor")),
         };
-        let sort = self.dropdown(DropId::HubSort, sort_name.into(), SortMode::NAMES.iter().map(|s| s.to_string()).collect(), 105.0, true, sort_colors, cx,
+        let sort = self.dropdown(DropId::HubSort, sort_name.into(), SortMode::NAMES.iter().map(|s| s.to_string()).collect(), 124.0, true, sort_colors, cx,
             |this, i, _, cx| {
                 {
                     let mut hub = this.hub.lock();
@@ -600,10 +607,10 @@ impl RootView {
             .child(search_btn)
             .child(sort);
         let mut toolbar = div()
-            .mx(px(20.))
-            .mt(px(12.))
-            .p(px(10.))
-            .rounded(px(16.))
+            .mx(px(16.))
+            .mt(px(14.))
+            .p(px(12.))
+            .rounded(px(R_CARD))
             .bg(super::pages::shade(self.color(S, "BackgroundColor"), 0.04))
             .flex()
             .flex_col()
@@ -614,8 +621,8 @@ impl RootView {
                     .items_end()
                     .justify_between()
                     .gap(px(8.))
-                    .child(text(&self.theme, "MIDI Hub", 22.0, text_color).font_weight(gpui::FontWeight::SEMIBOLD))
-                    .child(lines(&self.theme, "right-click a song for more", 11.0, self.color("Settings", "TextColorDisabled"))),
+                    .child(text(&self.theme, "MIDI Hub", 20.0, text_color).font_weight(gpui::FontWeight::SEMIBOLD))
+                    .child(lines(&self.theme, "Right-click a song for more", 12.0, self.color("Settings", "TextColorDisabled"))),
             )
             .child(search_row);
 
@@ -631,8 +638,8 @@ impl RootView {
                         .items_center()
                         .gap(px(10.))
                         .pt(px(150.))
-                        .child(lines(&self.theme, "Please Wait...", 40.0, text_color))
-                        .child(lines(&self.theme, "Fetching from nanomidi.net...", 14.0, text_color)),
+                        .child(text(&self.theme, "Loading songs…", 20.0, text_color).font_weight(gpui::FontWeight::SEMIBOLD))
+                        .child(lines(&self.theme, "Getting the list from nanomidi.net", 13.0, self.color("Settings", "TextColorDisabled"))),
                 );
             }
             HubStatus::Error(kind) => {
@@ -661,7 +668,7 @@ impl RootView {
                         .gap(px(14.))
                         .pt(px(30.))
                         .px(px(10.))
-                        .child(lines(&self.theme, "Couldn't reach\nnanomidi.net!", 40.0, text_color).items_center())
+                        .child(text(&self.theme, "Couldn't reach nanomidi.net", 20.0, text_color).font_weight(gpui::FontWeight::SEMIBOLD))
                         .child(lines(
                             &self.theme,
                             &format!(
@@ -708,15 +715,15 @@ impl RootView {
                                 .bg(self.color(S, "NextButtonColor"))
                                 .p(px(2.))
                                 .gap(px(2.))
-                                .child(self.hub_filter_tab("hub-tab-all", format!("All  {all_count}"), !showing_favs, false, cx))
-                                .child(self.hub_filter_tab("hub-tab-fav", format!("★  {fav_count}"), showing_favs, true, cx)),
+                                .child(self.hub_filter_tab("hub-tab-all", format!("All {all_count}"), !showing_favs, false, cx))
+                                .child(self.hub_filter_tab("hub-tab-fav", format!("Favorites {fav_count}"), showing_favs, true, cx)),
                         )
                         .child(div().flex_1().min_w_0().child(lines(&self.theme, &info, 11.0, self.color("Settings", "TextColorDisabled"))))
                         .child(self.hub_view_switch(cx)),
                 );
                 if items.is_empty() {
                     let msg = if showing_favs && fav_count == 0 {
-                        "No favorites yet.\nClick ☆ on a song to add it here."
+                        "No favorites yet.\nClick the star on a song to add it here."
                     } else {
                         "No songs found."
                     };
@@ -724,13 +731,13 @@ impl RootView {
                 }
                 // Grid tiles split the available width evenly (min ~150 px per tile).
                 let content_w: f32 = (window.viewport_size().width - px(super::SIDEBAR_W)).into();
-                let avail = (content_w - 40.0).max(150.0);
+                let avail = (content_w - 32.0).max(150.0);
                 let columns = ((avail + 8.0) / 158.0).floor().max(1.0);
                 let tile_w = ((avail - 8.0 * (columns - 1.0)) / columns).floor();
                 let mut list = match self.hub_view {
-                    super::HubView::Grid => div().mx(px(20.)).flex().flex_wrap().gap(px(8.)),
-                    super::HubView::List => div().mx(px(20.)).flex().flex_col().gap(px(8.)),
-                    super::HubView::Compact => div().mx(px(20.)).flex().flex_col().gap(px(4.)),
+                    super::HubView::Grid => div().mx(px(16.)).flex().flex_wrap().gap(px(8.)),
+                    super::HubView::List => div().mx(px(16.)).flex().flex_col().gap(px(8.)),
+                    super::HubView::Compact => div().mx(px(16.)).flex().flex_col().gap(px(4.)),
                 };
                 for (i, midi) in items.iter().enumerate() {
                     let image = midi
@@ -770,21 +777,21 @@ impl RootView {
                 };
                 body = body.child(
                     div()
-                        .mx(px(20.))
-                        .rounded(px(6.))
+                        .mx(px(16.))
+                        .rounded(px(R_CARD))
                         .bg(self.color(S, "PageControlFrameBackground"))
                         .p(px(10.))
                         .flex()
                         .items_center()
                         .justify_between()
                         .child(nav(self, "hub-prev", "Previous", -1, cx))
-                        .child(lines(&self.theme, &format!("Page {page}/{total}"), 14.0, text_color))
+                        .child(lines(&self.theme, &format!("Page {page} of {total}"), 13.0, text_color))
                         .child(nav(self, "hub-next", "Next", 1, cx)),
                 );
             }
         }
 
-        let body = div().flex().flex_col().gap(px(10.)).pb(px(10.)).child(toolbar).child(body);
+        let body = div().flex().flex_col().gap(px(10.)).pb(px(16.)).child(toolbar).child(body);
         div()
             .id("hub-scroll")
             .size_full()

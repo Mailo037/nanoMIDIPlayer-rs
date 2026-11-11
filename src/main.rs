@@ -18,10 +18,12 @@ mod slots;
 mod theme;
 mod ui;
 mod update;
+#[cfg(target_os = "linux")]
+mod x11;
 
 use std::time::Duration;
 
-use gpui::{App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+use gpui::{App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions, px, size};
 
 use crate::theme::Theme;
 use crate::ui::RootView;
@@ -74,8 +76,8 @@ fn main() {
     }
     update::on_startup();
 
-    Application::new().run(move |cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(600.), px(560.)), cx);
+    Application::new().with_assets(ui::Assets).run(move |cx: &mut App| {
+        let bounds = Bounds::centered(None, size(px(660.), px(720.)), cx);
         let window_core = core.clone();
         let window = cx
             .open_window(
@@ -87,7 +89,10 @@ fn main() {
                         traffic_light_position: None,
                     }),
                     is_resizable: true,
-                    window_min_size: Some(size(px(560.), px(520.))),
+                    window_min_size: Some(size(px(600.), px(520.))),
+                    // Linux: use the window manager's title bar where there is one; the app
+                    // draws its own only when the compositor has none (GNOME on Wayland).
+                    window_decorations: cfg!(target_os = "linux").then_some(WindowDecorations::Server),
                     app_id: Some("nanoMIDIPlayer".into()),
                     ..Default::default()
                 },

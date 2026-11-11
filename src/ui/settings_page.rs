@@ -5,6 +5,7 @@
 use gpui::prelude::*;
 use gpui::{Context, Div, ElementId, Stateful, Window, div, px};
 
+use super::icons::{Icon, icon};
 use super::widgets::*;
 use super::{Control, DropId, EntryId, RootView};
 use crate::config::{self, Config};
@@ -39,7 +40,7 @@ impl SettingsSection {
     fn subtitle(self) -> &'static str {
         match self {
             SettingsSection::General => "Window, playback behaviour and what is shown.",
-            SettingsSection::Players => "Options for the MIDI and Drums players.",
+            SettingsSection::Players => "Options for playing songs and drums.",
             SettingsSection::Hotkeys => "Global keys for playback and song slots.",
             SettingsSection::Library => "Downloaded songs and song lists.",
             SettingsSection::Theme => "Colors and look of the app.",
@@ -85,8 +86,7 @@ impl RootView {
 
     fn module_select(&self, id: DropId, value: String, cx: &mut Context<Self>, set: fn(&mut Config, String)) -> Div {
         let modules = vec!["pynput".to_string(), "keyboard".to_string()];
-        let value = if cfg!(windows) { value } else { "Unavailable".into() };
-        self.dropdown(id, value, modules.clone(), 130.0, cfg!(windows), self.dropdown_colors(S), cx, move |_, i, _, cx| {
+        self.dropdown(id, value, modules.clone(), 130.0, true, self.dropdown_colors(S), cx, move |_, i, _, cx| {
             let m = modules[i].clone();
             config::get().update(|c| set(c, m));
             cx.notify();
@@ -107,6 +107,20 @@ impl RootView {
         cx: &mut Context<Self>,
         f: impl Fn(&mut Self) + 'static,
     ) -> Stateful<Div> {
+        self.icon_button(id, None, label, width, enabled, colors, cx, f)
+    }
+
+    fn icon_button(
+        &self,
+        id: &str,
+        glyph: Option<Icon>,
+        label: &str,
+        width: f32,
+        enabled: bool,
+        colors: (&str, &str),
+        cx: &mut Context<Self>,
+        f: impl Fn(&mut Self) + 'static,
+    ) -> Stateful<Div> {
         button(
             &self.theme,
             ButtonSpec {
@@ -116,7 +130,7 @@ impl RootView {
                 height: ROW_H,
                 enabled,
                 colors: self.button_colors("MidiPlayer", colors.0, colors.1),
-                icon: None,
+                icon: glyph.map(|g| (g, 15.0)),
             },
             Self::click(cx, move |this, _, cx| {
                 f(this);
@@ -156,7 +170,11 @@ impl RootView {
         ];
         let mut cards = Vec::new();
         for (title, sections) in groups {
-            let mut card = self.card(S, title).gap(px(2.)).p(px(6.)).pt(px(10.));
+            let mut card = self
+                .card(S, "")
+                .gap(px(2.))
+                .p(px(6.))
+                .child(div().px(px(8.)).pt(px(6.)).pb(px(2.)).child(text(&self.theme, title, 13.0, text_c).font_weight(gpui::FontWeight::SEMIBOLD)));
             for (i, &section) in sections.iter().enumerate() {
                 let label = SettingsSection::ALL.iter().find(|(s, _)| *s == section).map(|(_, l)| *l).unwrap_or("");
                 let (status, highlight) = self.section_status(section);
@@ -167,7 +185,7 @@ impl RootView {
                 if !status.is_empty() {
                     right = right.child(text(&self.theme, ellipsize(&status, 11.0, 140.0), 11.0, if highlight { self.accent() } else { dim }).whitespace_nowrap());
                 }
-                right = right.child(text(&self.theme, "›", 18.0, dim));
+                right = right.child(icon(Icon::ChevronRight, 16.0, dim));
                 if i > 0 {
                     card = card.child(div().mx(px(8.)).h(px(1.)).bg(super::pages::shade(self.color(S, "BackgroundColor"), 0.06)));
                 }
@@ -178,8 +196,8 @@ impl RootView {
                         .items_center()
                         .gap(px(10.))
                         .px(px(8.))
-                        .py(px(8.))
-                        .rounded(px(10.))
+                        .py(px(9.))
+                        .rounded(px(R_CONTROL))
                         .cursor_pointer()
                         .hover(move |s| s.bg(hover))
                         .child(
@@ -189,7 +207,7 @@ impl RootView {
                                 .flex()
                                 .flex_col()
                                 .gap(px(2.))
-                                .child(text(&self.theme, label, 14.0, text_c))
+                                .child(text(&self.theme, label, 13.0, text_c))
                                 .child(self.hint(S, section.subtitle())),
                         )
                         .child(right)
@@ -215,7 +233,7 @@ impl RootView {
             .rounded(px(8.))
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
-            .child(text(&self.theme, "‹", 16.0, self.color(S, "TextColorDisabled")))
+            .child(icon(Icon::ChevronLeft, 14.0, self.color(S, "TextColorDisabled")))
             .child(text(&self.theme, "Settings", 12.0, self.color(S, "TextColorDisabled")))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.settings_section = None;
@@ -254,11 +272,11 @@ impl RootView {
         let (title, loop_song, release, hold, fail, module) = match target {
             Target::Midi => {
                 let m = &cfg.midi_player;
-                ("MIDI Player", m.loop_song, m.release_on_pause, m.custom_hold_length.enabled, m.random_fail.enabled, m.input_module.clone())
+                ("Play a song", m.loop_song, m.release_on_pause, m.custom_hold_length.enabled, m.random_fail.enabled, m.input_module.clone())
             }
             Target::Drums => {
                 let d = &cfg.drums;
-                ("Drums Player", d.loop_song, d.release_on_pause, d.custom_hold_length.enabled, d.random_fail.enabled, d.input_module.clone())
+                ("Play drums", d.loop_song, d.release_on_pause, d.custom_hold_length.enabled, d.random_fail.enabled, d.input_module.clone())
             }
         };
         let midi = target == Target::Midi;
@@ -275,21 +293,21 @@ impl RootView {
 
         let mut card = self
             .card(S, title)
-            .child(self.row("Loop song", "Start again when the song ends", loop_sw))
-            .child(self.row("Release keys on pause", "Let go of all held keys while paused", release_sw))
+            .child(self.row("Repeat song", "Starts again when the song ends", loop_sw))
+            .child(self.row("Release keys on pause", "Lets go of all held keys while paused", release_sw))
             .child(self.divider(S))
-            .child(self.row("Fixed note length", "Release every key after a fixed time", hold_sw));
+            .child(self.row("Fixed note length", "Releases every key after a fixed time", hold_sw));
         if hold {
             let c = self.value_control(note_len, 56.0, window, cx);
-            card = card.child(self.row("    Length (seconds)", "", c));
+            card = card.child(self.sub_row(S, "Length in seconds", c));
         }
-        card = card.child(self.row("Human mistakes", "Play slightly off, like a human", fail_sw));
+        card = card.child(self.row("Human mistakes", "Plays slightly off, like a person would", fail_sw));
         if fail {
             let c = self.value_control(speed_fail, 48.0, window, cx);
-            card = card.child(self.row("    Timing mistakes (%)", "", c));
+            card = card.child(self.sub_row(S, "Timing mistakes in %", c));
             if midi {
                 let c = self.value_control(Control::MidiTransposeFail, 48.0, window, cx);
-                card = card.child(self.row("    Wrong notes (%)", "", c));
+                card = card.child(self.sub_row(S, "Wrong notes in %", c));
             }
         }
         let step_c = self.value_control(step, 48.0, window, cx);
@@ -299,9 +317,13 @@ impl RootView {
             cx,
             if midi { |c, m| c.midi_player.input_module = m } else { |c, m| c.drums.input_module = m },
         );
-        card.child(self.divider(S))
-            .child(self.row("Speed hotkey step (%)", "How much Slower / Faster change the speed", step_c))
-            .child(self.row("Input method", "Try \"keyboard\" if a game ignores the keys", module_dd))
+        let card = card.child(self.divider(S)).child(self.row("Speed step in %", "How much the Slower and Faster hotkeys change the speed", step_c));
+        // The two key-press methods only exist on Windows.
+        if cfg!(windows) {
+            card.child(self.row("Key press method", "Try \"keyboard\" if a game ignores the keys", module_dd))
+        } else {
+            card
+        }
     }
 
     // ----------------------------------------------------------------- Hotkeys
@@ -315,13 +337,13 @@ impl RootView {
             console::toast("Hotkeys reset to F1–F5");
         });
         let players = self
-            .card(S, "Player hotkeys")
+            .card(S, "Playback hotkeys")
             .child(self.hint(
                 S,
                 if capturing {
                     "Press the new key…"
                 } else {
-                    "Work everywhere, also while your game is focused (on the MIDI and Drums tabs).\nClick a key to change it, right-click to reset it."
+                    "These keys work everywhere, also while your game is in front (on the Play a song and Play drums tabs).\nClick a key to change it, right-click to reset it."
                 },
             ))
             .child(self.hotkey_row(S, cx))
@@ -330,20 +352,20 @@ impl RootView {
         let text_c = self.color(S, "TextColor");
         let dim = self.color(S, "TextColorDisabled");
         let mut slot_card = self
-            .card(S, "Song slots · Alt + 1…9")
-            .child(self.hint(S, "Press Alt + number anywhere to load that song into the MIDI Player.\nAssign songs by right-clicking them in the MIDI Hub."));
+            .card(S, "Song slots: Alt + 1 to 9")
+            .child(self.hint(S, "Press Alt + a number anywhere to load that song.\nAssign songs by right-clicking them in the MIDI Hub."));
         for n in 0..slots::SLOT_COUNT {
             let song = slots::get(n);
             let key_chip = div()
-                .w(px(52.))
-                .h(px(24.))
+                .w(px(56.))
+                .h(px(26.))
                 .rounded(px(8.))
                 .flex()
                 .items_center()
                 .justify_center()
                 .bg(self.color(S, "ButtonColor"))
                 .child(text(&self.theme, format!("Alt+{}", n + 1), 11.0, text_c));
-            let mut row = div().flex().items_center().gap(px(10.)).min_h(px(28.)).child(key_chip);
+            let mut row = div().flex().items_center().gap(px(10.)).min_h(px(ROW_H)).child(key_chip);
             match song {
                 Some(song) => {
                     let name = song.name.clone();
@@ -353,7 +375,7 @@ impl RootView {
                             slots::activate(&this.core, n);
                             this.show_tab_silent(crate::core::Tab::Midi);
                         }))
-                        .child(self.styled_button(&format!("slot-clear-{n}"), "✕", 30.0, true, ("ButtonColor", "ButtonHoverColor"), cx, move |this| {
+                        .child(self.icon_button(&format!("slot-clear-{n}"), Some(Icon::Close), "", ROW_H, true, ("ButtonColor", "ButtonHoverColor"), cx, move |this| {
                             slots::clear(n);
                             console::toast(format!("Alt+{} cleared ({name})", n + 1));
                             this.core.bump();
@@ -385,11 +407,11 @@ impl RootView {
         };
         let clear_midi = self.styled_button("clear-midi", &format!("Clear ({midi_count})"), 130.0, midi_count > 0, ("ButtonColor", "ButtonHoverColor"), cx, |this| {
             this.core.clear_list(Target::Midi);
-            console::toast("MIDI Player list cleared");
+            console::toast("Song list cleared");
         });
         let clear_drums = self.styled_button("clear-drums", &format!("Clear ({drums_count})"), 130.0, drums_count > 0, ("ButtonColor", "ButtonHoverColor"), cx, |this| {
             this.core.clear_list(Target::Drums);
-            console::toast("Drums Player list cleared");
+            console::toast("Drum song list cleared");
         });
         vec![
             self.card(S, "Downloads")
@@ -401,8 +423,8 @@ impl RootView {
                 .child(self.row("Songs folder", "Documents/nanoMIDIPlayer/Midis", open_midis))
                 .child(self.row("Saved songs", "Delete every song kept in the songs folder", delete)),
             self.card(S, "Song lists")
-                .child(self.row("MIDI Player list", "Empties the song dropdown (files stay on disk)", clear_midi))
-                .child(self.row("Drums Player list", "Empties the song dropdown (files stay on disk)", clear_drums)),
+                .child(self.row("Songs", "Empties the list under Play a song (files stay on disk)", clear_midi))
+                .child(self.row("Drum songs", "Empties the list under Play drums (files stay on disk)", clear_drums)),
         ]
     }
 
@@ -506,7 +528,7 @@ impl RootView {
             .rounded_full(),
         );
         let page = latest.as_ref().map(|r| r.page_url.clone()).filter(|u| !u.is_empty()).unwrap_or_else(|| format!("{}/releases", super::FORK_REPO));
-        buttons = buttons.child(self.styled_button("upd-page", "Release page »", 140.0, true, ("ButtonColor", "ButtonHoverColor"), cx, move |_| net::open_url(&page)).rounded_full());
+        buttons = buttons.child(self.icon_button("upd-page", Some(Icon::External), "Release page", 140.0, true, ("ButtonColor", "ButtonHoverColor"), cx, move |_| net::open_url(&page)).rounded_full());
 
         let progress = match status {
             Status::Downloading(p) => Some(

@@ -94,7 +94,34 @@ mod platform {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod platform {
+    /// Active top-level X window and whether it belongs to this app.
+    pub fn foreground() -> Option<(isize, bool)> {
+        let (window, own) = crate::x11::get()?.active_window()?;
+        Some((window as isize, own))
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod platform {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+
+    /// Process id of the frontmost app and whether that is this app.
+    pub fn foreground() -> Option<(isize, bool)> {
+        unsafe {
+            let pool: *mut Object = msg_send![class!(NSAutoreleasePool), new];
+            let workspace: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+            let app: *mut Object = msg_send![workspace, frontmostApplication];
+            let pid: i32 = if app.is_null() { -1 } else { msg_send![app, processIdentifier] };
+            let _: () = msg_send![pool, drain];
+            (pid > 0).then(|| (pid as isize, pid as u32 == std::process::id()))
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod platform {
     pub fn foreground() -> Option<(isize, bool)> {
         None

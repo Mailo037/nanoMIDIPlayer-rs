@@ -1,4 +1,6 @@
-//! Keyboard simulation (SendInput) and global hotkey listening (low-level hook).
+//! Keyboard simulation and global hotkey listening: SendInput + a low-level hook on
+//! Windows, XTest + key state polling on Linux (X11 / XWayland), Quartz events + an
+//! event tap on macOS.
 //!
 //! Two simulation backends keep the original "Keyboard Module" choice:
 //! - `pynput`: virtual-key events (what pynput sends on Windows)
@@ -310,19 +312,454 @@ mod platform {
             })
             .ok();
     }
+
+    pub fn problem() -> Option<&'static str> {
+        None
+    }
 }
 
-#[cfg(not(windows))]
+/// The unshifted key (US layout) that types `c`; the caller presses Shift itself.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn base_char(c: char) -> char {
+    match c {
+        '!' => '1',
+        '@' => '2',
+        '#' => '3',
+        '$' => '4',
+        '%' => '5',
+        '^' => '6',
+        '&' => '7',
+        '*' => '8',
+        '(' => '9',
+        ')' => '0',
+        '_' => '-',
+        '+' => '=',
+        '{' => '[',
+        '}' => ']',
+        '|' => '\\',
+        ':' => ';',
+        '"' => '\'',
+        '<' => ',',
+        '>' => '.',
+        '?' => '/',
+        '~' => '`',
+        c => c.to_ascii_lowercase(),
+    }
+}
+
+/// Virtual-key code (as used by [`vk_to_name`]) of a US-layout punctuation key.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn punctuation_vk(c: char) -> Option<u32> {
+    Some(match c {
+        ';' => 0xBA,
+        '=' => 0xBB,
+        ',' => 0xBC,
+        '-' => 0xBD,
+        '.' => 0xBE,
+        '/' => 0xBF,
+        '`' => 0xC0,
+        '[' => 0xDB,
+        '\\' => 0xDC,
+        ']' => 0xDD,
+        '\'' => 0xDE,
+        _ => return None,
+    })
+}
+
+// Linux: XTest for key presses, key state polling for the hotkeys (X11 / XWayland).
+#[cfg(target_os = "linux")]
+mod platform {
+    use super::{Backend, Key};
+    use crate::x11::{self, X11};
+    use parking_lot::Mutex;
+    use std::time::{Duration, Instant};
+
+    /// When each keycode was last pressed or released by the app, so the hotkey poll
+    /// never mistakes simulated notes for the user's own key presses.
+    static INJECTED: Mutex<[Option<Instant>; 256]> = parking_lot::const_mutex([None; 256]);
+    static HELD: Mutex<[u8; 32]> = parking_lot::const_mutex([0; 32]);
+
+    fn bit(map: &[u8; 32], code: u8) -> bool {
+        map[code as usize / 8] & (1 << (code % 8)) != 0
+    }
+
+    fn keycode(x: &X11, key: Key) -> Option<u8> {
+        let keysym = match key {
+            Key::Shift => 0xffe1,
+            Key::Ctrl => 0xffe3,
+            Key::Alt => 0xffe9,
+            Key::Space => 0x20,
+            Key::Char(c) => {
+                let c = super::base_char(c);
+                if !(' '..='~').contains(&c) {
+                    return None;
+                }
+                c as u32
+            }
+        };
+        x.keycode_for(keysym)
+    }
+
+    pub fn send(key: Key, down: bool, _backend: Backend) {
+        let Some(x) = x11::get() else { return };
+        let Some(code) = keycode(x, key) else { return };
+        INJECTED.lock()[code as usize] = Some(Instant::now());
+        {
+            let mut held = HELD.lock();
+            let (i, mask) = (code as usize / 8, 1u8 << (code % 8));
+            if down {
+                held[i] |= mask;
+            } else {
+                held[i] &= !mask;
+            }
+        }
+        x.fake_key(code, down);
+    }
+
+    fn injected(code: u8) -> bool {
+        bit(&HELD.lock(), code) || INJECTED.lock()[code as usize].is_some_and(|t| t.elapsed() < Duration::from_millis(80))
+    }
+
+    /// Windows virtual-key code of a physical key, from its X keysym.
+    fn vk_for(x: &X11, code: u8) -> Option<u32> {
+        let sym = x.keysym(code, 0);
+        // Keypad digits sit on the second level unless Num Lock swaps them.
+        for s in [sym, x.keysym(code, 1)] {
+            if (0xffb0..=0xffb9).contains(&s) {
+                return Some(0x60 + (s - 0xffb0));
+            }
+        }
+        Some(match sym {
+            0x61..=0x7a => sym - 0x20,
+            0x41..=0x5a | 0x30..=0x39 | 0x20 => sym,
+            0xffbe..=0xffd5 => 0x70 + (sym - 0xffbe),
+            0xff08 => 0x08,
+            0xff09 => 0x09,
+            0xff0d | 0xff8d => 0x0D,
+            0xff13 => 0x13,
+            0xff1b => 0x1B,
+            0xff50 => 0x24,
+            0xff51 => 0x25,
+            0xff52 => 0x26,
+            0xff53 => 0x27,
+            0xff54 => 0x28,
+            0xff55 => 0x21,
+            0xff56 => 0x22,
+            0xff57 => 0x23,
+            0xff63 => 0x2D,
+            0xffff => 0x2E,
+            0xffe1 => 0xA0,
+            0xffe2 => 0xA1,
+            0xffe3 => 0xA2,
+            0xffe4 => 0xA3,
+            0xffe9 => 0xA4,
+            0xffea => 0xA5,
+            0xffe5 => 0x14,
+            0xff7f => 0x90,
+            0xff14 => 0x91,
+            0xffaa => 0x6A,
+            0xffab => 0x6B,
+            0xffad => 0x6D,
+            0xffae => 0x6E,
+            0xffaf => 0x6F,
+            0x21..=0x7e => return super::punctuation_vk(char::from_u32(sym)?),
+            _ => return None,
+        })
+    }
+
+    /// Watches the keyboard state on its own thread and reports every new key press.
+    pub fn start_hook(callback: impl Fn(u32) -> bool + Send + Sync + 'static) {
+        std::thread::Builder::new()
+            .name("keyboard-poll".into())
+            .spawn(move || {
+                let Some(x) = x11::get() else {
+                    log::warn!("global hotkeys need X11 or XWayland");
+                    return;
+                };
+                let alt_keys: Vec<u8> = [0xffe9, 0xffea, 0xffe7, 0xffe8].into_iter().filter_map(|s| x.keycode_for(s)).collect();
+                let mut prev = x.keymap().unwrap_or([0; 32]);
+                loop {
+                    std::thread::sleep(Duration::from_millis(8));
+                    let Some(now) = x.keymap() else {
+                        std::thread::sleep(Duration::from_secs(1));
+                        continue;
+                    };
+                    if now == prev {
+                        continue;
+                    }
+                    let alt = if alt_keys.iter().any(|k| bit(&now, *k)) { super::ALT_FLAG } else { 0 };
+                    for code in 8..=255u8 {
+                        if bit(&now, code) && !bit(&prev, code) && !injected(code) {
+                            if let Some(vk) = vk_for(x, code) {
+                                callback(vk | alt);
+                            }
+                        }
+                    }
+                    prev = now;
+                }
+            })
+            .ok();
+    }
+
+    pub fn problem() -> Option<&'static str> {
+        x11::get().is_none().then_some("No X11 display found. Key presses and hotkeys need X11 or XWayland.")
+    }
+}
+
+// macOS: Quartz events for key presses, an event tap for the hotkeys.
+#[cfg(target_os = "macos")]
+mod platform {
+    use super::{Backend, Key};
+    use std::ffi::c_void;
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+    use std::time::Duration;
+
+    type CGEventRef = *mut c_void;
+    type TapCallback = extern "C" fn(*mut c_void, u32, CGEventRef, *mut c_void) -> CGEventRef;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceCreate(state_id: i32) -> *mut c_void;
+        fn CGEventCreateKeyboardEvent(source: *mut c_void, keycode: u16, key_down: bool) -> CGEventRef;
+        fn CGEventSetFlags(event: CGEventRef, flags: u64);
+        fn CGEventGetFlags(event: CGEventRef) -> u64;
+        fn CGEventPost(tap: u32, event: CGEventRef);
+        fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
+        fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
+        fn CGEventTapCreate(tap: u32, place: u32, options: u32, mask: u64, callback: TapCallback, user_info: *mut c_void) -> *mut c_void;
+        fn CGEventTapEnable(tap: *mut c_void, enable: bool);
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFRunLoopCommonModes: *const c_void;
+        fn CFRelease(cf: *const c_void);
+        fn CFMachPortCreateRunLoopSource(allocator: *const c_void, port: *mut c_void, order: isize) -> *mut c_void;
+        fn CFRunLoopGetCurrent() -> *mut c_void;
+        fn CFRunLoopAddSource(run_loop: *mut c_void, source: *mut c_void, mode: *const c_void);
+        fn CFRunLoopRun();
+    }
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> u8;
+    }
+
+    const FLAG_SHIFT: u64 = 0x2_0000;
+    const FLAG_CONTROL: u64 = 0x4_0000;
+    const FLAG_OPTION: u64 = 0x8_0000;
+    /// kCGKeyboardEventAutorepeat, kCGKeyboardEventKeycode, kCGEventSourceUserData.
+    const FIELD_AUTOREPEAT: u32 = 8;
+    const FIELD_KEYCODE: u32 = 9;
+    const FIELD_USER_DATA: u32 = 42;
+    /// Marks the events this app posts, so the hotkey tap can skip them.
+    const MAGIC: i64 = 0x6e4d_4944;
+    const EVENT_KEY_DOWN: u32 = 10;
+
+    /// Modifier flags of the simulated Shift/Ctrl/Alt keys that are currently held.
+    static MODIFIERS: AtomicU64 = AtomicU64::new(0);
+
+    /// ANSI (US layout) key codes: (character, macOS key code).
+    const KEYCODES: [(char, u16); 47] = [
+        ('a', 0), ('s', 1), ('d', 2), ('f', 3), ('h', 4), ('g', 5), ('z', 6), ('x', 7), ('c', 8), ('v', 9),
+        ('b', 11), ('q', 12), ('w', 13), ('e', 14), ('r', 15), ('y', 16), ('t', 17), ('1', 18), ('2', 19),
+        ('3', 20), ('4', 21), ('6', 22), ('5', 23), ('=', 24), ('9', 25), ('7', 26), ('-', 27), ('8', 28),
+        ('0', 29), (']', 30), ('o', 31), ('u', 32), ('[', 33), ('i', 34), ('p', 35), ('l', 37), ('j', 38),
+        ('\'', 39), ('k', 40), (';', 41), ('\\', 42), (',', 43), ('/', 44), ('n', 45), ('m', 46), ('.', 47),
+        ('`', 50),
+    ];
+
+    fn keycode(key: Key) -> Option<u16> {
+        Some(match key {
+            Key::Shift => 56,
+            Key::Ctrl => 59,
+            Key::Alt => 58,
+            Key::Space => 49,
+            Key::Char(c) => {
+                let c = super::base_char(c);
+                KEYCODES.iter().find(|(ch, _)| *ch == c)?.1
+            }
+        })
+    }
+
+    fn source() -> *mut c_void {
+        static SOURCE: OnceLock<usize> = OnceLock::new();
+        // kCGEventSourceStateHIDSystemState
+        *SOURCE.get_or_init(|| unsafe { CGEventSourceCreate(1) } as usize) as *mut c_void
+    }
+
+    pub fn send(key: Key, down: bool, _backend: Backend) {
+        let Some(code) = keycode(key) else { return };
+        let flag = match key {
+            Key::Shift => FLAG_SHIFT,
+            Key::Ctrl => FLAG_CONTROL,
+            Key::Alt => FLAG_OPTION,
+            _ => 0,
+        };
+        let modifiers = if flag == 0 {
+            MODIFIERS.load(Ordering::Acquire)
+        } else if down {
+            MODIFIERS.fetch_or(flag, Ordering::AcqRel) | flag
+        } else {
+            MODIFIERS.fetch_and(!flag, Ordering::AcqRel) & !flag
+        };
+        unsafe {
+            let event = CGEventCreateKeyboardEvent(source(), code, down);
+            if event.is_null() {
+                return;
+            }
+            CGEventSetFlags(event, modifiers);
+            CGEventSetIntegerValueField(event, FIELD_USER_DATA, MAGIC);
+            CGEventPost(0, event); // kCGHIDEventTap
+            CFRelease(event as *const c_void);
+        }
+    }
+
+    /// Windows virtual-key code of a macOS key code.
+    fn vk_for(code: u16) -> Option<u32> {
+        if let Some((c, _)) = KEYCODES.iter().find(|(_, k)| *k == code) {
+            return match c {
+                'a'..='z' => Some(*c as u32 - 0x20),
+                '0'..='9' => Some(*c as u32),
+                _ => super::punctuation_vk(*c),
+            };
+        }
+        Some(match code {
+            122 => 0x70,
+            120 => 0x71,
+            99 => 0x72,
+            118 => 0x73,
+            96 => 0x74,
+            97 => 0x75,
+            98 => 0x76,
+            100 => 0x77,
+            101 => 0x78,
+            109 => 0x79,
+            103 => 0x7A,
+            111 => 0x7B,
+            36 | 76 => 0x0D,
+            48 => 0x09,
+            49 => 0x20,
+            51 => 0x08,
+            53 => 0x1B,
+            56 => 0xA0,
+            60 => 0xA1,
+            59 => 0xA2,
+            62 => 0xA3,
+            58 => 0xA4,
+            61 => 0xA5,
+            57 => 0x14,
+            115 => 0x24,
+            116 => 0x21,
+            117 => 0x2E,
+            119 => 0x23,
+            121 => 0x22,
+            123 => 0x25,
+            124 => 0x27,
+            125 => 0x28,
+            126 => 0x26,
+            82..=89 => 0x60 + (code as u32 - 82),
+            91 => 0x68,
+            92 => 0x69,
+            67 => 0x6A,
+            69 => 0x6B,
+            78 => 0x6D,
+            65 => 0x6E,
+            75 => 0x6F,
+            _ => return None,
+        })
+    }
+
+    type Callback = Box<dyn Fn(u32) -> bool + Send + Sync>;
+    static CALLBACK: OnceLock<Callback> = OnceLock::new();
+    static TAP: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+    extern "C" fn tap_callback(_proxy: *mut c_void, kind: u32, event: CGEventRef, _user_info: *mut c_void) -> CGEventRef {
+        unsafe {
+            // The system switches a slow tap off (timeout / user input): switch it on again.
+            if kind == 0xFFFF_FFFE || kind == 0xFFFF_FFFF {
+                let tap = TAP.load(Ordering::Acquire);
+                if !tap.is_null() {
+                    CGEventTapEnable(tap, true);
+                }
+                return event;
+            }
+            if kind == EVENT_KEY_DOWN
+                && !event.is_null()
+                && CGEventGetIntegerValueField(event, FIELD_USER_DATA) != MAGIC
+                && CGEventGetIntegerValueField(event, FIELD_AUTOREPEAT) == 0
+            {
+                let code = CGEventGetIntegerValueField(event, FIELD_KEYCODE) as u16;
+                if let (Some(vk), Some(callback)) = (vk_for(code), CALLBACK.get()) {
+                    let alt = if CGEventGetFlags(event) & FLAG_OPTION != 0 { super::ALT_FLAG } else { 0 };
+                    callback(vk | alt);
+                }
+            }
+        }
+        event
+    }
+
+    /// Listens for key presses with an event tap on its own thread. macOS only allows
+    /// that once the app is enabled under Privacy & Security, so this keeps trying.
+    pub fn start_hook(callback: impl Fn(u32) -> bool + Send + Sync + 'static) {
+        if CALLBACK.set(Box::new(callback)).is_err() {
+            return;
+        }
+        std::thread::Builder::new()
+            .name("keyboard-tap".into())
+            .spawn(|| unsafe {
+                let mut warned = false;
+                let tap = loop {
+                    // Session tap, head insert, listen only, key-down events.
+                    let tap = CGEventTapCreate(1, 0, 1, 1u64 << EVENT_KEY_DOWN, tap_callback, std::ptr::null_mut());
+                    if !tap.is_null() {
+                        break tap;
+                    }
+                    if !warned {
+                        warned = true;
+                        log::warn!("global hotkeys need the Accessibility / Input Monitoring permission");
+                    }
+                    std::thread::sleep(Duration::from_secs(3));
+                };
+                TAP.store(tap, Ordering::Release);
+                let source = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
+                if source.is_null() {
+                    log::error!("failed to attach the keyboard event tap");
+                    return;
+                }
+                CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes);
+                CGEventTapEnable(tap, true);
+                CFRunLoopRun();
+            })
+            .ok();
+    }
+
+    pub fn problem() -> Option<&'static str> {
+        (unsafe { AXIsProcessTrusted() } == 0).then_some(
+            "macOS is blocking key presses. Allow nanoMIDIPlayer in System Settings → Privacy & Security → Accessibility and Input Monitoring, then restart the app.",
+        )
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod platform {
     use super::{Backend, Key};
 
-    pub fn send(_key: Key, _down: bool, _backend: Backend) {
-        // Key simulation is currently implemented for Windows only.
-    }
+    pub fn send(_key: Key, _down: bool, _backend: Backend) {}
 
     pub fn start_hook(_callback: impl Fn(u32) -> bool + Send + Sync + 'static) {
-        log::warn!("global hotkeys are only implemented on Windows");
+        log::warn!("global hotkeys are not implemented on this system");
+    }
+
+    pub fn problem() -> Option<&'static str> {
+        Some("Key presses and hotkeys are not supported on this system.")
     }
 }
 
 pub use platform::start_hook;
+
+/// Why key presses and hotkeys cannot work right now, if they cannot (shown in the UI).
+pub fn problem() -> Option<&'static str> {
+    platform::problem()
+}

@@ -2,6 +2,7 @@
 
 mod controls;
 mod hub_page;
+mod icons;
 mod info_page;
 mod menu;
 mod pages;
@@ -17,12 +18,14 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, ElementId, FocusHandle, Hsla, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Pixels, ScrollHandle, SharedString, Window, WindowControlArea, div, img, px,
+    App, Bounds, Context, CursorStyle, Decorations, ElementId, FocusHandle, Hsla, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, ResizeEdge, ScrollHandle, SharedString, Window,
+    WindowControlArea, div, img, px,
 };
 use parking_lot::Mutex;
 
 pub use controls::Control;
+pub use icons::{Assets, Icon};
 pub use menu::MenuItem;
 pub use settings_page::SettingsSection;
 
@@ -34,6 +37,7 @@ use crate::live::PIANO;
 use crate::preview::Preview;
 use crate::theme::{self, Theme};
 use crate::update;
+use icons::icon;
 use widgets::*;
 
 /// Version of this fork (from Cargo.toml), shown in the title bar and sidebar.
@@ -110,7 +114,6 @@ pub struct RootView {
     pub info_scroll: ScrollHandle,
     pub themes: Arc<Mutex<ThemeList>>,
     pub pending_theme: Arc<Mutex<Option<Theme>>>,
-    pub hwnd: Option<isize>,
     /// Whether the "Advanced" section of the player tabs is expanded.
     pub advanced: bool,
     /// Layout of the MIDI Hub song list.
@@ -170,7 +173,6 @@ impl RootView {
             info_scroll: ScrollHandle::new(),
             themes,
             pending_theme: Arc::new(Mutex::new(None)),
-            hwnd: None,
             advanced: false,
             hub_view: HubView::List,
             topmost_applied: None,
@@ -241,11 +243,13 @@ impl RootView {
     }
 
     pub fn switch_colors(&self, section: &str) -> SwitchColors {
+        // "Off" is neutral instead of the themes' red, which read as an error.
+        let base = self.color(section, "BackgroundColor");
         SwitchColors {
             on: self.color(section, "SwitchEnabled"),
-            off: self.color(section, "SwitchDisabled"),
-            knob: self.color(section, "SwitchCircle"),
-            knob_hover: self.color(section, "SwitchCircleHovered"),
+            off: pages::shade(base, 0.2),
+            knob: gpui::white(),
+            knob_off: pages::shade(base, 0.58),
             text: self.color(section, "TextColor"),
             text_disabled: self.color(section, "TextColorDisabled"),
         }
@@ -263,17 +267,16 @@ impl RootView {
     pub fn slider_colors(&self, section: &str, prefix: &str) -> SliderColors {
         SliderColors {
             track: self.color(section, &format!("{prefix}BackColor")),
-            fill: self.color(section, &format!("{prefix}FillColor")),
-            knob: self.color(section, &format!("{prefix}CircleColor")),
-            knob_hover: self.color(section, &format!("{prefix}CircleHoverColor")),
+            // Filled part and knob use the text colors so they stay visible on any theme.
+            fill: self.color(section, "TextColorDisabled"),
+            knob: self.color(section, "TextColor"),
         }
     }
 
     pub fn dropdown_colors(&self, section: &str) -> DropdownColors {
         DropdownColors {
             bg: self.color(section, "OptionBackColor"),
-            button: self.color(section, "OptionDropdownButtonColor"),
-            button_hover: self.color(section, "OptionDropdownButtonHoverColor"),
+            hover: self.color(section, "OptionDropdownButtonColor"),
             menu_bg: self.color(section, "OptionDropdownBackground"),
             item_hover: self.color(section, "OptionDropdownButtonHoverColor"),
             text: self.color(section, "TextColor"),
@@ -283,7 +286,7 @@ impl RootView {
     }
 
     pub fn label(&self, s: &str, section: &str) -> gpui::Div {
-        lines(&self.theme, s, 14.0, self.color(section, "TextColor"))
+        lines(&self.theme, s, 13.0, self.color(section, "TextColor"))
     }
 
     /// Generic option menu bound to a [`DropId`].
@@ -460,18 +463,18 @@ impl RootView {
                 }
                 window.blur();
             }
-            "v" if ks.modifiers.control => {
+            "v" if ks.modifiers.control || ks.modifiers.platform => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
                     state.buffer.push_str(text.trim_end_matches(['\r', '\n']));
                     changed = true;
                 }
             }
-            "a" if ks.modifiers.control => {
+            "a" if ks.modifiers.control || ks.modifiers.platform => {
                 state.buffer.clear();
                 changed = true;
             }
             _ => {
-                if !ks.modifiers.control && !ks.modifiers.alt {
+                if !ks.modifiers.control && !ks.modifiers.platform && !ks.modifiers.alt {
                     if let Some(ch) = &ks.key_char {
                         if !ch.chars().any(|c| c.is_control()) {
                             state.buffer.push_str(ch);
@@ -504,7 +507,7 @@ impl RootView {
     pub fn hotkey_button(&self, slot: HotkeySlot, section: &str, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let capturing = self.core.state.lock().capturing;
         let label = if capturing == Some(slot) {
-            "...".to_string()
+            "Press a key".to_string()
         } else {
             config::get().read().hotkeys.get(slot).to_uppercase()
         };
@@ -520,7 +523,7 @@ impl RootView {
             ButtonSpec {
                 id: ElementId::Name(format!("hk-{section}-{slot:?}").into()),
                 label: label.into(),
-                width: 70.0,
+                width: if capturing == Some(slot) { 96.0 } else { 64.0 },
                 height: ROW_H,
                 enabled: capturing.is_none() || capturing == Some(slot),
                 colors: self.button_colors(section, "HotkeySelectorColor", "HotkeySelectorHoverColor"),
@@ -539,11 +542,11 @@ impl RootView {
                 let is_default = current.eq_ignore_ascii_case(&default);
                 vec![
                     MenuItem::title(tooltip.trim_end_matches(" Hotkey")),
-                    MenuItem::new("⌥", "Change key…", move |this, _, cx| {
+                    MenuItem::new(Icon::Keycap, "Change key…", move |this, _, cx| {
                         this.core.begin_capture(slot);
                         cx.notify();
                     }),
-                    MenuItem::new("⟲", format!("Reset to {}", default.to_uppercase()), move |this, _, cx| {
+                    MenuItem::new(Icon::Restart, format!("Reset to {}", default.to_uppercase()), move |this, _, cx| {
                         let taken = HotkeySlot::ALL
                             .iter()
                             .any(|s| *s != slot && config::get().read().hotkeys.get(*s).eq_ignore_ascii_case(&default));
@@ -568,11 +571,11 @@ impl RootView {
             ButtonSpec {
                 id: ElementId::Name(id.to_string().into()),
                 label: "".into(),
-                width: 30.0,
+                width: ROW_H,
                 height: ROW_H,
                 enabled,
                 colors: self.button_colors(section, "ButtonColor", "ButtonHoverColor"),
-                icon: self.theme.icons.reset.clone().map(|i| (i, 16.0)),
+                icon: Some((Icon::Restart, 15.0)),
             },
             on,
         );
@@ -599,31 +602,6 @@ impl RootView {
             );
         }
         d
-    }
-
-    pub fn timeline_text(&self, target: Target) -> String {
-        let player = match target {
-            Target::Midi => &self.core.piano,
-            Target::Drums => &self.core.drums,
-        };
-        let length = {
-            let state = self.core.state.lock();
-            match target {
-                Target::Midi => state.midi.length,
-                Target::Drums => state.drums.length,
-            }
-        };
-        let show = config::get().read().app_ui.timestamp;
-        let (mut pos, len) = if player.is_running() { player.position() } else { (0.0, length) };
-        if let Some((_, frac)) = self.scrub.filter(|(t, _)| *t == target) {
-            pos = len * frac as f64;
-        }
-        let total = crate::midi_file::format_time(len);
-        if show {
-            format!("{} / {}", crate::midi_file::format_time(pos), total)
-        } else {
-            format!("X:XX:XX / {total}")
-        }
     }
 
     // ------------------------------------------------------------- navigation
@@ -676,37 +654,29 @@ impl RootView {
         }
     }
 
-    fn nav_button(
-        &self,
-        id: &'static str,
-        label: &str,
-        icon: Option<Arc<gpui::Image>>,
-        icon_size: f32,
-        tab: Tab,
-        text_color: Hsla,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
+    fn nav_button(&self, id: &'static str, label: &str, glyph: Icon, tab: Tab, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let selected = self.tab == tab;
+        let text = self.color("Navigation", "TextColor");
+        let color = if selected { text } else { Hsla { a: text.a * 0.68, ..text } };
         let bg = if selected {
-            pages::shade(self.color("Navigation", "TabButtonSelectedColor"), 0.03)
+            pages::shade(self.color("Navigation", "TabButtonSelectedColor"), 0.04)
         } else {
             self.color("Navigation", "TabButtonColor")
         };
         let hover = self.color("Navigation", "TabButtonHoverColor");
-        let accent = self.accent();
         let mut el = div()
             .id(id)
-            .relative()
-            .mx(px(8.))
-            .h(px(38.))
+            .h(px(36.))
             .px(px(10.))
-            .rounded(px(10.))
+            .rounded(px(R_CONTROL))
             .flex()
             .items_center()
-            .gap(px(9.))
+            .gap(px(10.))
             .bg(bg)
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
+            .child(icon(glyph, 16.0, color))
+            .child(div().flex_1().min_w_0().child(text_label(&self.theme, label, 13.0, color).whitespace_nowrap()))
             .on_click(cx.listener(move |this, _, _, cx| {
                 // The sidebar entry always opens the settings overview.
                 if tab == Tab::Settings && this.settings_section.take().is_some() {
@@ -715,15 +685,6 @@ impl RootView {
                 }
                 this.show_tab(tab, cx)
             }));
-        if selected {
-            el = el.child(div().absolute().left(px(0.)).top(px(10.)).w(px(3.)).h(px(18.)).rounded_full().bg(accent));
-        }
-        let mut content = div().flex().items_center().gap(px(9.)).flex_1().min_w_0().when(!selected, |d| d.opacity(0.72));
-        if let Some(icon) = icon {
-            content = content.child(img(icon).w(px(icon_size)).h(px(icon_size)).flex_shrink_0());
-        }
-        content = content.child(lines(&self.theme, label, 13.0, text_color));
-        el = el.child(content);
         if let Some(dot) = self.nav_badge(tab) {
             el = el.child(div().w(px(8.)).h(px(8.)).rounded_full().bg(dot).flex_shrink_0());
         }
@@ -732,14 +693,9 @@ impl RootView {
 
     fn sidebar(&self, cx: &mut Context<Self>) -> gpui::Div {
         let t = &self.theme;
-        let text = self.color("Navigation", "TextColor");
         let custom_wm = self.color("Navigation", "CustomWatermarkColor");
         let dim = self.color("MidiPlayer", "TextColorDisabled");
-        let mut logo = div().h(px(60.)).flex().items_center().justify_center();
-        if let Some(banner) = t.icons.banner.clone() {
-            logo = logo.child(img(banner).w(px(86.)).h(px(26.)));
-        }
-        let caption = |s: &str| div().px(px(20.)).pt(px(10.)).pb(px(4.)).child(text_label(t, &s.to_uppercase(), 10.0, dim));
+        let caption = |s: &str| div().px(px(10.)).pt(px(12.)).pb(px(4.)).child(text_label(t, s, 12.0, dim));
         let mut bar = div()
             .w(px(SIDEBAR_W))
             .h_full()
@@ -747,23 +703,28 @@ impl RootView {
             .flex()
             .flex_col()
             .gap(px(2.))
-            .bg(self.color("Navigation", "BackColor"))
-            .child(logo)
+            .px(px(8.))
+            .pb(px(8.))
+            .bg(self.color("Navigation", "BackColor"));
+        if let Some(banner) = t.icons.banner.clone() {
+            bar = bar.child(div().h(px(48.)).px(px(10.)).flex().items_center().child(img(banner).w(px(86.)).h(px(26.))));
+        }
+        bar = bar
             .child(caption("Play"))
-            .child(self.nav_button("nav-midi", "MIDI Player", t.icons.piano.clone(), 18.0, Tab::Midi, text, cx))
-            .child(self.nav_button("nav-drums", "Drums Player", t.icons.drum.clone(), 18.0, Tab::Drums, text, cx))
-            .child(self.nav_button("nav-qwerty", "MIDI To QWERTY", t.icons.keyboard.clone(), 16.0, Tab::ToQwerty, text, cx))
-            .child(caption("Discover"))
-            .child(self.nav_button("nav-hub", "MIDI Hub", t.icons.search.clone().or(t.icons.piano.clone()), 16.0, Tab::Hub, text, cx))
-            .child(caption("App"))
-            .child(self.nav_button("nav-settings", "Settings", t.icons.cogwheel.clone(), 16.0, Tab::Settings, text, cx))
-            .child(self.nav_button("nav-info", "About", t.icons.info.clone(), 16.0, Tab::Info, text, cx))
+            .child(self.nav_button("nav-midi", "Play a song", Icon::Music, Tab::Midi, cx))
+            .child(self.nav_button("nav-drums", "Play drums", Icon::Drum, Tab::Drums, cx))
+            .child(self.nav_button("nav-qwerty", "Live keyboard", Icon::Keyboard, Tab::ToQwerty, cx))
+            .child(caption("Get songs"))
+            .child(self.nav_button("nav-hub", "MIDI Hub", Icon::Search, Tab::Hub, cx))
             .child(div().flex_1());
         for line in [&t.watermark_ln1, &t.watermark_ln2] {
             if !line.is_empty() {
                 bar = bar.child(div().flex().justify_center().child(lines(t, line, 12.0, custom_wm)));
             }
         }
+        bar = bar
+            .child(self.nav_button("nav-settings", "Settings", Icon::Settings, Tab::Settings, cx))
+            .child(self.nav_button("nav-info", "Help & about", Icon::Help, Tab::Info, cx));
         // Version + update hint at the bottom.
         let (status, latest) = {
             let st = update::state();
@@ -783,17 +744,17 @@ impl RootView {
         bar.child(
             div()
                 .id("nav-version")
-                .mx(px(8.))
-                .mb(px(8.))
+                .mt(px(4.))
                 .px(px(10.))
                 .py(px(6.))
-                .rounded(px(10.))
+                .rounded(px(R_CONTROL))
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
                 .flex()
                 .flex_col()
+                .gap(px(1.))
                 .child(text_label(t, &format!("nanoMIDIPlayer {APP_VERSION}"), 11.0, dim))
-                .when(show_line2, |d| d.child(text_label(t, &line2, 10.0, color)))
+                .when(show_line2, |d| d.child(text_label(t, &line2, 11.0, color)))
                 .on_click(cx.listener(|this, _, _, cx| this.show_settings(SettingsSection::Updates, cx))),
         )
     }
@@ -817,8 +778,8 @@ impl RootView {
                 ButtonSpec {
                     id: id.into(),
                     label: label.to_string().into(),
-                    width: (label.chars().count() as f32 * 8.0 + 24.0).max(60.0),
-                    height: 26.0,
+                    width: 0.0,
+                    height: 28.0,
                     enabled: true,
                     colors: if primary {
                         self.button_colors(s, "PlayColor", "PlayColorHover")
@@ -863,17 +824,17 @@ impl RootView {
             .justify_center()
             .cursor_pointer()
             .hover(|s| s.bg(gpui::rgba(0xffffff14)))
-            .child(text_label(&self.theme, "✕", 11.0, dim))
+            .child(icon(Icon::Close, 13.0, dim))
             .on_click(cx.listener(|_, _, _, cx| {
                 update::dismiss();
                 cx.notify();
             }));
         let mut row = div()
-            .mx(px(12.))
-            .mt(px(10.))
+            .mx(px(16.))
+            .mt(px(12.))
             .px(px(12.))
             .py(px(8.))
-            .rounded(px(12.))
+            .rounded(px(R_CARD))
             .bg(pages::shade(self.color(s, "BackgroundColor"), 0.05))
             .border_1()
             .border_color(self.accent())
@@ -929,30 +890,29 @@ impl RootView {
         if self.topmost_applied == Some(want) {
             return;
         }
-        if self.hwnd.is_none() {
-            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            if let Ok(handle) = HasWindowHandle::window_handle(window) {
-                if let RawWindowHandle::Win32(h) = handle.as_raw() {
-                    self.hwnd = Some(h.hwnd.get());
-                }
-            }
+        // A new window is not on top, so there is nothing to undo on the first frame.
+        if self.topmost_applied.is_none() && !want {
+            self.topmost_applied = Some(false);
+            return;
         }
-        if let Some(hwnd) = self.hwnd {
-            set_topmost(hwnd, want);
+        use raw_window_handle::HasWindowHandle;
+        if let Ok(handle) = HasWindowHandle::window_handle(window) {
+            set_topmost(handle.as_raw(), want);
             self.topmost_applied = Some(want);
         }
     }
 }
 
-pub const SIDEBAR_W: f32 = 168.0;
+pub const SIDEBAR_W: f32 = 164.0;
 
 #[cfg(windows)]
-fn set_topmost(hwnd: isize, on: bool) {
+fn set_topmost(handle: raw_window_handle::RawWindowHandle, on: bool) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::*;
+    let raw_window_handle::RawWindowHandle::Win32(h) = handle else { return };
     unsafe {
         let _ = SetWindowPos(
-            HWND(hwnd as *mut _),
+            HWND(h.hwnd.get() as *mut _),
             Some(if on { HWND_TOPMOST } else { HWND_NOTOPMOST }),
             0,
             0,
@@ -963,8 +923,41 @@ fn set_topmost(hwnd: isize, on: bool) {
     }
 }
 
-#[cfg(not(windows))]
-fn set_topmost(_hwnd: isize, _on: bool) {}
+/// X11 and XWayland: ask the window manager. Wayland has no way to request this.
+#[cfg(target_os = "linux")]
+fn set_topmost(handle: raw_window_handle::RawWindowHandle, on: bool) {
+    use raw_window_handle::RawWindowHandle;
+    let window = match handle {
+        RawWindowHandle::Xcb(h) => h.window.get(),
+        RawWindowHandle::Xlib(h) => h.window as u32,
+        _ => {
+            log::warn!("\"Always on top\" is not available on Wayland");
+            return;
+        }
+    };
+    if let Some(x) = crate::x11::get() {
+        x.set_above(window, on);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_topmost(handle: raw_window_handle::RawWindowHandle, on: bool) {
+    use objc::runtime::Object;
+    use objc::{msg_send, sel, sel_impl};
+    let raw_window_handle::RawWindowHandle::AppKit(h) = handle else { return };
+    unsafe {
+        let view = h.ns_view.as_ptr() as *mut Object;
+        let window: *mut Object = msg_send![view, window];
+        if !window.is_null() {
+            // NSFloatingWindowLevel = 3, NSNormalWindowLevel = 0
+            let level: isize = if on { 3 } else { 0 };
+            let _: () = msg_send![window, setLevel: level];
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn set_topmost(_handle: raw_window_handle::RawWindowHandle, _on: bool) {}
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -980,6 +973,8 @@ impl Render for RootView {
         let banner = self.update_banner(cx);
         let toast = self.toast();
         let menu = self.render_menu(cx);
+        let titlebar = self.titlebar(window);
+        let resize = self.resize_handles(window);
         let page_bg = self.color(
             match self.tab {
                 Tab::Midi => "MidiPlayer",
@@ -1004,6 +999,7 @@ impl Render for RootView {
             .when_some(toast, |d, t| d.child(t));
         div()
             .id("root")
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -1050,26 +1046,36 @@ impl Render for RootView {
                     cx.notify();
                 }
             }))
-            .child(self.titlebar(window))
+            .when_some(titlebar, |d, t| d.child(t))
             .child(div().flex().flex_1().min_h_0().child(self.sidebar(cx)).child(content))
             .when_some(menu, |d, m| d.child(m))
+            .children(resize)
     }
 }
 
 pub const TITLEBAR_H: f32 = 34.0;
 
 impl RootView {
-    /// Custom title bar: app name on the left, drag area, and window buttons.
-    /// On Windows the buttons are handled natively through `WindowControlArea`
-    /// (so snap layouts etc. keep working).
-    fn titlebar(&self, window: &Window) -> gpui::Stateful<gpui::Div> {
+    /// Custom title bar: app name, drag area and window buttons.
+    ///
+    /// - Windows: the buttons are hit-tested natively through `WindowControlArea`, so
+    ///   snap layouts keep working.
+    /// - macOS: the system draws its own buttons on the left; this is only the title.
+    /// - Linux: only shown when the window has no server-side decorations (for example
+    ///   GNOME on Wayland); otherwise the window manager's title bar is used.
+    fn titlebar(&self, window: &Window) -> Option<gpui::Stateful<gpui::Div>> {
+        let linux = cfg!(target_os = "linux");
+        let mac = cfg!(target_os = "macos");
+        if linux && matches!(window.window_decorations(), Decorations::Server) {
+            return None;
+        }
         let bg = self.color("Navigation", "BackColor");
         let text = self.color("Navigation", "TextColor");
-        let dim = self.color("Navigation", "WatermarkColor");
+        let dim = self.color("MidiPlayer", "TextColorDisabled");
         let hover = self.color("Navigation", "TabButtonHoverColor");
         let maximized = window.is_maximized();
 
-        let control = |id: &'static str, glyph: &'static str, area: WindowControlArea, close: bool| {
+        let control = |id: &'static str, glyph: Icon, area: WindowControlArea, close: bool| {
             let hover_bg = if close { gpui::rgb(0xc42b1c).into() } else { hover };
             div()
                 .id(id)
@@ -1078,13 +1084,11 @@ impl RootView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(12.))
-                .text_color(text)
                 .hover(move |s| s.bg(hover_bg))
                 .window_control_area(area)
-                .child(glyph)
+                .child(icon(glyph, 14.0, text))
                 .when(!cfg!(windows), |d| {
-                    d.on_click(move |_, window, _| match area {
+                    d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(move |_, window, _| match area {
                         WindowControlArea::Min => window.minimize_window(),
                         WindowControlArea::Max => window.zoom_window(),
                         WindowControlArea::Close => window.remove_window(),
@@ -1097,11 +1101,11 @@ impl RootView {
             .flex()
             .items_center()
             .gap(px(8.))
-            .pl(px(14.))
+            .pl(px(if mac { 78. } else { 14. }))
             .child(text_label(&self.theme, "nanoMIDIPlayer", 12.0, text))
             .child(text_label(&self.theme, APP_VERSION, 11.0, dim));
 
-        div()
+        let bar = div()
             .id("titlebar")
             .h(px(TITLEBAR_H))
             .w_full()
@@ -1117,12 +1121,47 @@ impl RootView {
                     .flex()
                     .items_center()
                     .window_control_area(WindowControlArea::Drag)
-                    .when(!cfg!(windows), |d| d.on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move()))
+                    .when(linux, |d| d.on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move()))
                     .child(title),
-            )
-            .child(control("tb-min", "─", WindowControlArea::Min, false))
-            .child(control("tb-max", if maximized { "❐" } else { "□" }, WindowControlArea::Max, false))
-            .child(control("tb-close", "✕", WindowControlArea::Close, true))
+            );
+        if mac {
+            return Some(bar);
+        }
+        Some(
+            bar.child(control("tb-min", Icon::Minimize, WindowControlArea::Min, false))
+                .child(control("tb-max", if maximized { Icon::Restore } else { Icon::Maximize }, WindowControlArea::Max, false))
+                .child(control("tb-close", Icon::Close, WindowControlArea::Close, true)),
+        )
+    }
+
+    /// Invisible resize zones along the window edges, for Linux windows that draw their
+    /// own decorations (there the window manager provides no resize border).
+    fn resize_handles(&self, window: &Window) -> Vec<gpui::Div> {
+        if !cfg!(target_os = "linux") || window.is_maximized() || !matches!(window.window_decorations(), Decorations::Client { .. }) {
+            return Vec::new();
+        }
+        let edge = px(5.);
+        let corner = px(12.);
+        let zone = |cursor: CursorStyle, edge: ResizeEdge| {
+            div()
+                .absolute()
+                .occlude()
+                .cursor(cursor)
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    cx.stop_propagation();
+                    window.start_window_resize(edge)
+                })
+        };
+        vec![
+            zone(CursorStyle::ResizeUpDown, ResizeEdge::Top).top_0().left(corner).right(corner).h(edge),
+            zone(CursorStyle::ResizeUpDown, ResizeEdge::Bottom).bottom_0().left(corner).right(corner).h(edge),
+            zone(CursorStyle::ResizeLeftRight, ResizeEdge::Left).left_0().top(corner).bottom(corner).w(edge),
+            zone(CursorStyle::ResizeLeftRight, ResizeEdge::Right).right_0().top(corner).bottom(corner).w(edge),
+            zone(CursorStyle::ResizeUpLeftDownRight, ResizeEdge::TopLeft).top_0().left_0().w(corner).h(corner),
+            zone(CursorStyle::ResizeUpRightDownLeft, ResizeEdge::TopRight).top_0().right_0().w(corner).h(corner),
+            zone(CursorStyle::ResizeUpRightDownLeft, ResizeEdge::BottomLeft).bottom_0().left_0().w(corner).h(corner),
+            zone(CursorStyle::ResizeUpLeftDownRight, ResizeEdge::BottomRight).bottom_0().right_0().w(corner).h(corner),
+        ]
     }
 }
 

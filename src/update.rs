@@ -1,9 +1,10 @@
 //! Update check and self-update from this fork's GitHub releases.
 //!
-//! The new exe is downloaded next to the running one and then swapped in. Windows
-//! allows renaming a running exe, so the current file becomes `<exe>.old` (deleted on
-//! the next start) and the new one takes its place: the next launch, or "Restart now",
-//! already runs the new version.
+//! The new binary is downloaded next to the running one and then swapped in. Windows
+//! and Linux allow renaming a running executable, so the current file becomes
+//! `<exe>.old` (deleted on the next start) and the new one takes its place: the next
+//! launch, or "Restart now", already runs the new version. On macOS "Update" opens the
+//! release page instead (the app bundle is replaced by hand).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -100,16 +101,27 @@ pub fn busy() -> bool {
     matches!(STATE.lock().status, Status::Checking | Status::Downloading(_))
 }
 
+/// Is this release file the self-updating binary for this system? The release workflow
+/// uploads `nanoMIDIPlayer-<tag>-windows-x64.exe` and `nanoMIDIPlayer-<tag>-linux-x64`.
+/// macOS ships as an app bundle, which is replaced by hand from the release page.
+fn asset_matches(name: &str) -> bool {
+    let name = name.to_lowercase();
+    if cfg!(windows) {
+        name.ends_with(".exe") && name.contains("windows")
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        name.ends_with("-linux-x64")
+    } else {
+        false
+    }
+}
+
+/// First bytes of an executable for this system (PE on Windows, ELF on Linux).
+const EXE_MAGIC: &[u8] = if cfg!(windows) { b"MZ" } else { b"\x7fELF" };
+
 fn fetch_latest() -> anyhow::Result<Release> {
     let info: Value = net::get_json(&format!("https://api.github.com/repos/{REPO}/releases/latest"))?;
     let version = info["tag_name"].as_str().ok_or_else(|| anyhow::anyhow!("no release found"))?.to_string();
-    // The release workflow uploads `nanoMIDIPlayer-<tag>-windows-x64.exe`.
-    let asset = info["assets"].as_array().and_then(|assets| {
-        assets.iter().find(|a| {
-            let name = a["name"].as_str().unwrap_or("").to_lowercase();
-            name.ends_with(".exe") && name.contains("windows")
-        })
-    });
+    let asset = info["assets"].as_array().and_then(|assets| assets.iter().find(|a| asset_matches(a["name"].as_str().unwrap_or(""))));
     Ok(Release {
         page_url: info["html_url"].as_str().unwrap_or("").to_string(),
         asset_url: asset.and_then(|a| a["browser_download_url"].as_str()).map(str::to_string),
@@ -151,7 +163,10 @@ pub fn check(install_found: bool) {
             }
         };
         VERSION.fetch_add(1, Ordering::Release);
-        if found && install_found {
+        // Without a self-updating download, installing only opens the release page:
+        // never do that on its own.
+        let installable = STATE.lock().latest.as_ref().is_some_and(|r| r.asset_url.is_some());
+        if found && install_found && installable {
             install();
         }
     });
@@ -168,8 +183,14 @@ fn short_error(e: &anyhow::Error) -> String {
     }
 }
 
+/// `<exe>.<suffix>` next to the running binary (`nanoMIDIPlayer.exe.old`, …).
+fn side_file(exe: &Path, suffix: &str) -> PathBuf {
+    let name = exe.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "nanoMIDIPlayer".into());
+    exe.with_file_name(format!("{name}.{suffix}"))
+}
+
 fn old_path(exe: &Path) -> PathBuf {
-    exe.with_extension("exe.old")
+    side_file(exe, "old")
 }
 
 /// Downloads the latest release and swaps it in for the running exe.
@@ -183,7 +204,13 @@ pub fn install() {
     };
     let Some(release) = release.filter(|r| is_newer(&r.version, &current_version())) else { return };
     let Some(url) = release.asset_url.clone() else {
-        set_status(Status::Error("This release has no Windows download. Use the download page.".into()));
+        // No self-updating download for this system: the release page has the files.
+        if release.page_url.is_empty() {
+            set_status(Status::Error("This release has no download for this system.".into()));
+        } else {
+            net::open_url(&release.page_url);
+            console::toast("Opened the download page");
+        }
         return;
     };
     set_status(Status::Downloading(None));
@@ -202,7 +229,7 @@ pub fn install() {
 
 fn download_and_swap(url: &str, size: u64) -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
-    let new = exe.with_extension("exe.new");
+    let new = side_file(&exe, "new");
     let mut file = std::fs::File::create(&new).map_err(|e| {
         anyhow::anyhow!("Can't write to {} ({e}). Download the update manually.", exe.parent().unwrap_or(&exe).display())
     })?;
@@ -223,11 +250,16 @@ fn download_and_swap(url: &str, size: u64) -> anyhow::Result<()> {
             return Err(e);
         }
     };
-    // Sanity checks: complete file and a Windows executable ("MZ" header).
-    let head = std::fs::read(&new).map(|b| b.get(..2) == Some(b"MZ")).unwrap_or(false);
+    // Sanity checks: complete file and an executable for this system.
+    let head = std::fs::read(&new).map(|b| b.starts_with(EXE_MAGIC)).unwrap_or(false);
     if !head || (size > 0 && written != size) || written < 1024 * 1024 {
         let _ = std::fs::remove_file(&new);
         anyhow::bail!("The download was incomplete. Please try again.");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755))?;
     }
     let old = old_path(&exe);
     let _ = std::fs::remove_file(&old);
@@ -252,8 +284,7 @@ pub fn relaunch() -> bool {
 pub fn cleanup_old() {
     let Ok(exe) = std::env::current_exe() else { return };
     let old = old_path(&exe);
-    let new = exe.with_extension("exe.new");
-    let _ = std::fs::remove_file(new);
+    let _ = std::fs::remove_file(side_file(&exe, "new"));
     if !old.exists() {
         return;
     }
@@ -274,7 +305,7 @@ pub fn on_startup() {
         let c = config::get().read();
         (c.app_ui.check_for_updates, c.app_ui.auto_update)
     };
-    if check_on_start && cfg!(windows) {
+    if check_on_start {
         check(auto);
     }
 }
