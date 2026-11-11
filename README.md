@@ -46,12 +46,12 @@ sudo apt install libasound2-dev libfontconfig1-dev libfreetype-dev libwayland-de
 | | Key presses | Global hotkeys | Pause on focus loss | Always on top | Self-update |
 |---|---|---|---|---|---|
 | Windows | SendInput (virtual keys or scan codes) | low-level keyboard hook | yes | yes | yes |
-| Linux | XTest | key state polling | yes | X11 only | yes (x64) |
+| Linux | XTest | keyboard devices (`/dev/input`), else X11 key state polling | yes | X11 only | yes (x64) |
 | macOS | Quartz events | event tap | yes (per app) | yes | opens the release page |
 
 Linux and macOS support is new: the Linux build is compile-checked, the macOS code has not run on a real Mac yet. Please report what does not work.
 
-- **Linux**: key presses and hotkeys go through X11, so they work in X11 sessions and with XWayland windows (most games) on Wayland. Native Wayland windows cannot receive simulated keys this way. Keys are sent by position on a US keyboard layout.
+- **Linux**: key presses and hotkeys go through X11, so they work in X11 sessions and with XWayland windows (most games) on Wayland. Native Wayland windows cannot receive simulated keys this way. Keys are sent by position on a US keyboard layout. Hotkeys work everywhere when your user can read `/dev/input` (`sudo usermod -aG input $USER`, then log in again); without that they only work while the app window or an X11 game window is focused. Song previews use FluidSynth/TiMidity if one is running, otherwise a small built-in synth.
 - **macOS**: allow nanoMIDIPlayer under System Settings → Privacy & Security → **Accessibility** (key presses) and **Input Monitoring** (hotkeys), then restart the app. The app shows a note until that is done. F1–F5 may need the Fn key, depending on your keyboard settings. Releases are not notarized, so the first start needs right-click → Open.
 
 ## Notes

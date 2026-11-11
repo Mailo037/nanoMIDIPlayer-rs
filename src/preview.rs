@@ -1,6 +1,7 @@
-//! Song preview for the MIDI Hub: plays the start of a MIDI through a MIDI output
-//! device (on Windows the built-in "Microsoft GS Wavetable Synth") without
-//! pressing any keys, so a song can be heard before using it.
+//! Song preview for the MIDI Hub: plays the start of a MIDI without pressing any keys,
+//! so a song can be heard before using it. Uses a software MIDI synth when the system
+//! has one (Windows: "Microsoft GS Wavetable Synth", Linux: FluidSynth / TiMidity),
+//! otherwise the app's own small synth through the default audio output.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -71,7 +72,7 @@ impl Preview {
         if !alive() {
             return Ok(());
         }
-        let mut conn = open_preview_output()?;
+        let mut conn = Output::open()?;
         on_start();
 
         let begin = Instant::now();
@@ -99,30 +100,70 @@ impl Preview {
                 MidiEvent::Control { channel, control, value } => [0xB0 | channel, control, value],
                 MidiEvent::Other => continue,
             };
-            let _ = conn.send(&msg);
+            conn.send(&msg);
         }
         all_notes_off(&mut conn);
         Ok(())
     }
 }
 
-/// Prefers the system software synth, falls back to the first output device.
-fn open_preview_output() -> anyhow::Result<midir::MidiOutputConnection> {
-    let out = midir::MidiOutput::new("nanoMIDIPlayer-preview")?;
-    let ports = out.ports();
-    let port = ports
-        .iter()
-        .find(|p| out.port_name(p).is_ok_and(|n| n.to_lowercase().contains("wavetable")))
-        .or_else(|| ports.first())
-        .ok_or_else(|| anyhow::anyhow!("no MIDI output device found"))?
-        .clone();
-    out.connect(&port, "nanoMIDIPlayer-preview")
-        .map_err(|e| anyhow::anyhow!("could not open MIDI output: {e}"))
+enum Output {
+    Midi(midir::MidiOutputConnection),
+    Synth(crate::synth::Synth),
 }
 
-fn all_notes_off(conn: &mut midir::MidiOutputConnection) {
+impl Output {
+    /// A system software synth if there is one, else the built-in synth, else any
+    /// real MIDI output device ("Midi Through" ports are skipped: they make no sound).
+    fn open() -> anyhow::Result<Output> {
+        let out = midir::MidiOutput::new("nanoMIDIPlayer-preview")?;
+        let ports: Vec<(midir::MidiOutputPort, String)> = out
+            .ports()
+            .into_iter()
+            .filter_map(|p| {
+                let name = out.port_name(&p).ok()?.to_lowercase();
+                (!name.contains("through")).then_some((p, name))
+            })
+            .collect();
+        let software = ports
+            .iter()
+            .find(|(_, n)| ["wavetable", "fluid", "timidity", "synth"].iter().any(|s| n.contains(s)));
+        if let Some((port, name)) = software {
+            match out.connect(port, "nanoMIDIPlayer-preview") {
+                Ok(conn) => return Ok(Output::Midi(conn)),
+                Err(e) => log::warn!("could not open {name}: {e}"),
+            }
+            // `connect` consumed `out`; the built-in synth is the fallback.
+            return crate::synth::Synth::open().map(Output::Synth);
+        }
+        let synth_err = match crate::synth::Synth::open() {
+            Ok(s) => return Ok(Output::Synth(s)),
+            Err(e) => e,
+        };
+        log::warn!("built-in preview synth failed: {synth_err}");
+        let (port, _) = ports.first().ok_or_else(|| anyhow::anyhow!("no audio or MIDI output found ({synth_err})"))?;
+        out.connect(port, "nanoMIDIPlayer-preview")
+            .map(Output::Midi)
+            .map_err(|e| anyhow::anyhow!("could not open MIDI output: {e}"))
+    }
+
+    fn send(&mut self, msg: &[u8]) {
+        match self {
+            Output::Midi(c) => {
+                let _ = c.send(msg);
+            }
+            Output::Synth(s) => s.send(msg),
+        }
+    }
+}
+
+fn all_notes_off(conn: &mut Output) {
     for channel in 0..16u8 {
-        let _ = conn.send(&[0xB0 | channel, 64, 0]); // sustain off
-        let _ = conn.send(&[0xB0 | channel, 123, 0]); // all notes off
+        conn.send(&[0xB0 | channel, 64, 0]); // sustain off
+        conn.send(&[0xB0 | channel, 123, 0]); // all notes off
+    }
+    if matches!(conn, Output::Synth(_)) {
+        // Let the notes fade out instead of cutting the audio with a click.
+        std::thread::sleep(Duration::from_millis(150));
     }
 }

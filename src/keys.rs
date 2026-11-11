@@ -184,6 +184,12 @@ pub fn vk_to_name(vk: u32) -> Option<String> {
     Some(name)
 }
 
+/// Virtual-key code of a GPUI key name ("f1", "a", "pageup", …), the inverse of [`vk_to_name`].
+pub fn name_to_vk(key: &str) -> Option<u32> {
+    let name = normalize_hotkey(key);
+    (0x08..=0xDE).find(|vk| vk_to_name(*vk).is_some_and(|n| n == name))
+}
+
 /// Normalizes a configured hotkey name so it can be compared with [`vk_to_name`].
 pub fn normalize_hotkey(name: &str) -> String {
     let n = name.trim().to_lowercase().replace('_', " ");
@@ -366,12 +372,14 @@ fn punctuation_vk(c: char) -> Option<u32> {
     })
 }
 
-// Linux: XTest for key presses, key state polling for the hotkeys (X11 / XWayland).
+// Linux: XTest for key presses; hotkeys from /dev/input, or X11 key state polling.
 #[cfg(target_os = "linux")]
 mod platform {
     use super::{Backend, Key};
     use crate::x11::{self, X11};
     use parking_lot::Mutex;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
     use std::time::{Duration, Instant};
 
     /// When each keycode was last pressed or released by the app, so the hotkey poll
@@ -467,13 +475,182 @@ mod platform {
         })
     }
 
-    /// Watches the keyboard state on its own thread and reports every new key press.
+    /// Linux input key code (`KEY_*` from linux/input-event-codes.h) to virtual-key code.
+    fn evdev_vk(code: u16) -> Option<u32> {
+        const LETTERS: [(u16, u8); 26] = [
+            (30, b'A'), (48, b'B'), (46, b'C'), (32, b'D'), (18, b'E'), (33, b'F'), (34, b'G'), (35, b'H'), (23, b'I'),
+            (36, b'J'), (37, b'K'), (38, b'L'), (50, b'M'), (49, b'N'), (24, b'O'), (25, b'P'), (16, b'Q'), (19, b'R'),
+            (31, b'S'), (20, b'T'), (22, b'U'), (47, b'V'), (17, b'W'), (45, b'X'), (21, b'Y'), (44, b'Z'),
+        ];
+        if let Some((_, c)) = LETTERS.iter().find(|(k, _)| *k == code) {
+            return Some(*c as u32);
+        }
+        Some(match code {
+            2..=10 => 0x31 + (code as u32 - 2),
+            11 => 0x30,
+            59..=68 => 0x70 + (code as u32 - 59),
+            87 => 0x7A,
+            88 => 0x7B,
+            183..=194 => 0x7C + (code as u32 - 183),
+            1 => 0x1B,
+            12 => 0xBD,
+            13 => 0xBB,
+            14 => 0x08,
+            15 => 0x09,
+            26 => 0xDB,
+            27 => 0xDD,
+            28 | 96 => 0x0D,
+            29 => 0xA2,
+            97 => 0xA3,
+            39 => 0xBA,
+            40 => 0xDE,
+            41 => 0xC0,
+            42 => 0xA0,
+            54 => 0xA1,
+            43 => 0xDC,
+            51 => 0xBC,
+            52 => 0xBE,
+            53 => 0xBF,
+            55 => 0x6A,
+            56 => 0xA4,
+            100 => 0xA5,
+            57 => 0x20,
+            58 => 0x14,
+            69 => 0x90,
+            70 => 0x91,
+            71 => 0x67,
+            72 => 0x68,
+            73 => 0x69,
+            74 => 0x6D,
+            75 => 0x64,
+            76 => 0x65,
+            77 => 0x66,
+            78 => 0x6B,
+            79 => 0x61,
+            80 => 0x62,
+            81 => 0x63,
+            82 => 0x60,
+            83 => 0x6E,
+            98 => 0x6F,
+            99 => 0x2C,
+            102 => 0x24,
+            103 => 0x26,
+            104 => 0x21,
+            105 => 0x25,
+            106 => 0x27,
+            107 => 0x23,
+            108 => 0x28,
+            109 => 0x22,
+            110 => 0x2D,
+            111 => 0x2E,
+            119 => 0x13,
+            125 => 0x5B,
+            126 => 0x5C,
+            _ => return None,
+        })
+    }
+
+    /// `/dev/input/eventN` paths of the keyboards listed in /proc/bus/input/devices
+    /// (devices with a `kbd` handler and key repeat).
+    fn keyboard_devices() -> Vec<String> {
+        let Ok(text) = std::fs::read_to_string("/proc/bus/input/devices") else { return Vec::new() };
+        let mut found = Vec::new();
+        for block in text.split("\n\n") {
+            let mut event = None;
+            let mut kbd = false;
+            let mut repeat = false;
+            for line in block.lines() {
+                if let Some(h) = line.strip_prefix("H: Handlers=") {
+                    kbd = h.split_whitespace().any(|w| w == "kbd");
+                    event = h.split_whitespace().find(|w| w.starts_with("event")).map(str::to_owned);
+                } else if let Some(ev) = line.strip_prefix("B: EV=") {
+                    repeat = u64::from_str_radix(ev.trim(), 16).is_ok_and(|bits| bits & (1 << 20) != 0);
+                }
+            }
+            if let (Some(event), true, true) = (event, kbd, repeat) {
+                found.push(format!("/dev/input/{event}"));
+            }
+        }
+        found
+    }
+
+    /// 0 = not started, 1 = reading keyboards directly, 2 = X11 polling only.
+    static MODE: AtomicU8 = AtomicU8::new(0);
+
+    /// Reads key presses straight from the keyboards (works under Wayland and X11, and
+    /// never sees the app's own XTest presses). Needs read access to /dev/input, which
+    /// members of the `input` group have. Returns false when no keyboard could be opened.
+    fn start_evdev(callback: Arc<dyn Fn(u32) -> bool + Send + Sync>) -> bool {
+        use std::io::Read;
+        static ALT: AtomicU8 = AtomicU8::new(0);
+        // struct input_event: struct timeval, u16 type, u16 code, i32 value.
+        const TIMEVAL: usize = 2 * std::mem::size_of::<usize>();
+        const SIZE: usize = TIMEVAL + 8;
+        let mut opened = 0;
+        for path in keyboard_devices() {
+            let mut file = match std::fs::File::open(&path) {
+                Ok(f) => f,
+                Err(e) => {
+                    log::info!("cannot read {path}: {e}");
+                    continue;
+                }
+            };
+            opened += 1;
+            let callback = callback.clone();
+            let _ = std::thread::Builder::new().name("keyboard-evdev".into()).spawn(move || {
+                let mut buf = [0u8; SIZE * 32];
+                loop {
+                    let n = match file.read(&mut buf) {
+                        Ok(0) | Err(_) => return, // unplugged
+                        Ok(n) => n,
+                    };
+                    for ev in buf[..n].chunks_exact(SIZE) {
+                        let kind = u16::from_ne_bytes([ev[TIMEVAL], ev[TIMEVAL + 1]]);
+                        let code = u16::from_ne_bytes([ev[TIMEVAL + 2], ev[TIMEVAL + 3]]);
+                        let value = i32::from_ne_bytes([ev[TIMEVAL + 4], ev[TIMEVAL + 5], ev[TIMEVAL + 6], ev[TIMEVAL + 7]]);
+                        if kind != 1 {
+                            continue; // not EV_KEY
+                        }
+                        if code == 56 || code == 100 {
+                            let bit = if code == 56 { 1 } else { 2 };
+                            if value == 0 {
+                                ALT.fetch_and(!bit, Ordering::AcqRel);
+                            } else {
+                                ALT.fetch_or(bit, Ordering::AcqRel);
+                            }
+                        }
+                        if value != 1 {
+                            continue; // release or auto-repeat
+                        }
+                        if let Some(vk) = evdev_vk(code) {
+                            let alt = if ALT.load(Ordering::Acquire) != 0 { super::ALT_FLAG } else { 0 };
+                            callback(vk | alt);
+                        }
+                    }
+                }
+            });
+        }
+        if opened > 0 {
+            log::info!("hotkeys: reading {opened} keyboard device(s) directly");
+        }
+        opened > 0
+    }
+
+    /// Global hotkeys: read the keyboards directly when allowed, otherwise poll the X11
+    /// key state (which only sees keys while an X11 / XWayland window has focus).
     pub fn start_hook(callback: impl Fn(u32) -> bool + Send + Sync + 'static) {
+        let callback: Arc<dyn Fn(u32) -> bool + Send + Sync> = Arc::new(callback);
+        if start_evdev(callback.clone()) {
+            MODE.store(1, Ordering::Release);
+            return;
+        }
+        MODE.store(2, Ordering::Release);
+        log::warn!("hotkeys: no readable keyboard in /dev/input (join the input group); falling back to X11 polling");
         std::thread::Builder::new()
             .name("keyboard-poll".into())
             .spawn(move || {
                 let Some(x) = x11::get() else {
-                    log::warn!("global hotkeys need X11 or XWayland");
+                    log::warn!("global hotkeys need X11, XWayland or access to /dev/input");
                     return;
                 };
                 let alt_keys: Vec<u8> = [0xffe9, 0xffea, 0xffe7, 0xffe8].into_iter().filter_map(|s| x.keycode_for(s)).collect();
@@ -501,8 +678,17 @@ mod platform {
             .ok();
     }
 
+    fn wayland() -> bool {
+        std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland")
+    }
+
     pub fn problem() -> Option<&'static str> {
-        x11::get().is_none().then_some("No X11 display found. Key presses and hotkeys need X11 or XWayland.")
+        if x11::get().is_none() {
+            return Some("No X11 display found. Key presses need X11 or XWayland.");
+        }
+        (MODE.load(Ordering::Acquire) == 2 && wayland()).then_some(
+            "Hotkeys only work while this window or an X11 game window is focused. For hotkeys everywhere, run \"sudo usermod -aG input $USER\", then log out and back in.",
+        )
     }
 }
 

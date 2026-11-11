@@ -1005,6 +1005,17 @@ impl Render for RootView {
             .flex_col()
             .font_family(self.theme.ui_font.clone())
             .bg(self.color("MidiPlayer", "BackgroundColor"))
+            // Keys pressed in this window also count as hotkeys (and for recording one):
+            // on Linux under Wayland the global hook does not see this window.
+            // Text entries stop propagation, so typing never reaches this.
+            .when(!cfg!(windows), |d| {
+                d.on_key_down(|ev, _, _| {
+                    if let Some(vk) = crate::keys::name_to_vk(&ev.keystroke.key) {
+                        let alt = if ev.keystroke.modifiers.alt { crate::keys::ALT_FLAG } else { 0 };
+                        crate::core::app_key(vk | alt);
+                    }
+                })
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {

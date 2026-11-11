@@ -526,14 +526,35 @@ impl Core {
     }
 }
 
+/// Key presses from the global hook and from the app's own window go here.
+static HOTKEY_TX: std::sync::OnceLock<crossbeam_channel::Sender<(u32, bool)>> = std::sync::OnceLock::new();
+
+/// A key pressed while the app's own window has focus (`code` as from the global hook).
+/// Needed where the global hook cannot see the app's window (Linux under Wayland);
+/// a press that both paths report is handled once.
+pub fn app_key(code: u32) {
+    if let Some(tx) = HOTKEY_TX.get() {
+        let _ = tx.send((code, true));
+    }
+}
+
 /// Starts the global keyboard hook; key presses are handled on a worker thread so the
 /// hook itself returns immediately.
 pub fn start_hotkeys(core: Arc<Core>) {
-    let (tx, rx) = crossbeam_channel::unbounded::<u32>();
+    let (tx, rx) = crossbeam_channel::unbounded::<(u32, bool)>();
+    let _ = HOTKEY_TX.set(tx.clone());
     std::thread::Builder::new()
         .name("hotkeys".into())
         .spawn(move || {
-            for code in rx {
+            // Last press per source (global hook, app window), to drop the duplicate.
+            let mut last: [Option<(u32, std::time::Instant)>; 2] = [None, None];
+            for (code, from_app) in rx {
+                let other = last[!from_app as usize];
+                last[from_app as usize] = Some((code, std::time::Instant::now()));
+                if other.is_some_and(|(c, t)| c == code && t.elapsed() < std::time::Duration::from_millis(150)) {
+                    last = [None, None];
+                    continue;
+                }
                 // Alt+1 … Alt+9 load song slots (unless a hotkey is being recorded).
                 if let Some(slot) = keys::alt_digit(code) {
                     if core.state.lock().capturing.is_none() {
@@ -546,7 +567,7 @@ pub fn start_hotkeys(core: Arc<Core>) {
         })
         .ok();
     keys::start_hook(move |vk| {
-        let _ = tx.send(vk);
+        let _ = tx.send((vk, false));
         false
     });
 }

@@ -15,6 +15,7 @@ mod preview;
 mod scheduler;
 mod simulate;
 mod slots;
+mod synth;
 mod theme;
 mod ui;
 mod update;
